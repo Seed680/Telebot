@@ -16,6 +16,7 @@
 - **项目归档与预览支持**：
   - 新增 `docs/screenshots/` 文件夹用于存放 UI 截图
   - `.gitignore` 增加 `archive/` 与 `.github_backup/` 规则
+- **预置设备伪装**：新增 Android 选项（Samsung Galaxy S24 / Android 14 / Telegram 12.6.4）
 - **部署依赖**：`backend/pyproject.toml` 补全 `psycopg2-binary` 依赖，解决 Docker 模式下 Alembic 无法运行同步迁移的问题
 
 ### Changed
