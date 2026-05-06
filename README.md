@@ -2,9 +2,9 @@
 
 > Self-hosted Web UI for managing Telegram userbots: auto-reply, forward, scheduler, custom AI commands, rate limiting.
 
-[![CI](https://github.com/yourusername/telebot/workflows/CI/badge.svg)](https://github.com/yourusername/telebot/actions)
+<!-- [![CI](https://github.com/Anoyou/telebot/workflows/CI/badge.svg)](https://github.com/Anoyou/telebot/actions) -->
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-
+纯 Vibe，想到什么做什么。有些地方还不完善。
 ## Features
 
 - 🪪 **多账号绑定**：基于 Telethon，支持代理与设备伪装
@@ -25,7 +25,7 @@ _Coming soon: Dashboard / 账号详情 / 自动回复编辑 / 命令模板_
 ### 本机自用（HTTP，5 分钟）
 
 ```bash
-git clone https://github.com/yourusername/telebot
+git clone https://github.com/Anoyou/telebot
 cd telebot
 cp .env.example .env       # 改 MASTER_KEY / JWT_SECRET
 make dev-up                # PG + Redis（OrbStack / Docker）
