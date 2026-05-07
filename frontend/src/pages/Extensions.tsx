@@ -137,9 +137,9 @@ function FeatureMatrixTab() {
         qc.invalidateQueries({ queryKey: ["accounts"] });
       }, 1500);
     },
-    onError: (err, vars, ctx) => {
+    onError: (err, _vars, ctx) => {
       // 回滚乐观更新
-      if (ctx?.snapshot) qc.setQueryData(["matrix"], ctx.snapshot);
+      if ((ctx as any)?.snapshot) qc.setQueryData(["matrix"], (ctx as any).snapshot);
       toast.error(getErrMsg(err));
     },
     onMutate: async (vars) => {
