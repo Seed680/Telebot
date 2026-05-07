@@ -194,13 +194,13 @@
 
 ### Added
 - **前后端版本不一致检测**：避免再发生"代码改了但 uvicorn 没重启 / SW 缓存老前端 → 用户看老行为以为代码没生效"的幻觉式 bug。
-  - 后端：`GET /api/system/version`（**public 无鉴权**）返回 "version": "0.6.1"
+  - 后端：`GET /api/system/version`（**public 无鉴权**）返回 "version": "0.7.1"
   - 前端：`GlobalAlertBar` 拆成 `VersionMismatchBar` + `KillSwitchBar`；启动 + 每 60s 拉一次后端版本，不一致时顶部弹**琥珀色横幅**："前后端版本不一致 · 前端 vX.Y.Z · 后端 vA.B.C — 请 `make restart` + 硬刷"，含一键"硬刷新"按钮。
 - **agent-plans/README.md §4.1**：新增"必跑 `make restart`"规范，列明哪些情况必须整套重启 + 哪些 `--reload` 能搞定。
 - **agent-plans/README.md §3** 共用基础设施：把 `make up` / `make restart` / `make down` 提到首位，`make backend`（带 reload）降级为"调试时用"。
 
 ### Notes
-- 单元测试不要直接 `from app.api.system_health import router` 然后调 `/api/system/version`——这是 public 端点没鉴权依赖，pytest 拿到的是 `VersionInfo(version=__version__ = "0.6.1"
+- 单元测试不要直接 `from app.api.system_health import router` 然后调 `/api/system/version`——这是 public 端点没鉴权依赖，pytest 拿到的是 `VersionInfo(version=__version__ = "0.7.1"
 APP_STAGE: str | None = "feature"
 int 4")`，下次 bump 版本号时 `stage` 字段如果摘掉得记得这里同步。
 
@@ -233,7 +233,7 @@ int 4")`，下次 bump 版本号时 `stage` 字段如果摘掉得记得这里同
 - Sidebar 顶层菜单 7 项 → 7 项（"功能矩阵" + "插件管理" 合成 "扩展中心"，腾出位置但不增加）。
 
 ### Fixed
-- alembic 0012 误写 `down_reversion = "0.6.1"` 与 0011 构成分叉，汇总验收时修正为 `down_revision="0011"`，再次回到单 head。
+- alembic 0012 误写 `down_reversion = "0.7.1"` 与 0011 构成分叉，汇总验收时修正为 `down_revision="0011"`，再次回到单 head。
 
 ---
 
@@ -275,7 +275,7 @@ int 4")`，下次 bump 版本号时 `stage` 字段如果摘掉得记得这里同
 - 内置命令支持短别名：`help(h)`、`status(s, st)`、`id(i)`、`version(v)`。
 - `,help` 输出改为折叠展示主命令与别名，并合并展示自定义模板别名。
 - 命令模板设置页新增别名输入与展示列；保存时对别名格式和冲突做校验。
-- 前端版本号改为 `frontend/src/lib/version.ts` 单点定义，export const APP_VERSION = "0.6.1";
+- 前端版本号改为 `frontend/src/lib/version.ts` 单点定义，export const APP_VERSION = "0.7.1";
 
 ### Fixed
 - 自定义命令名/别名冲突规则统一：同账号维度下，模板 `name + aliases` 不可互撞，也不可与内置命令及其别名冲突。
