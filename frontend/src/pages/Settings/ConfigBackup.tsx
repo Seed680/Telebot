@@ -75,7 +75,7 @@ export function ConfigBackup() {
     mutationFn: async () => {
       const res = await api.post("/api/system/export-config", {
         categories: Array.from(selected),
-        include_sensitive,
+        includeSensitive,
       }, { responseType: "blob" });
       // 从 Content-Disposition 提取文件名
       const disposition = res.headers["content-disposition"] || "";

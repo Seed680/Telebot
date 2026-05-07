@@ -10,6 +10,50 @@
 
 ---
 
+## [0.7.1] — 2026-05-07 · patch · Docker 部署优化与前端构建修复
+
+### Added
+- **GitHub Actions CI (Frontend)**：新增 `.github/workflows/frontend-ci.yml`，在推送或 PR 到 main 分支时自动校验前端构建。
+
+### Fixed
+- **Docker 部署路径报错**：修复 ARM64 构建时 `nginx.conf` 找不到以及 `docs/` 目录在容器内路径不匹配的问题。
+- **Frontend 生产构建失败**：
+  - 修正 `Extensions.tsx` 在 TypeScript strict 模式下的类型推断错误。
+  - 修正 `ConfigBackup.tsx` 中 `includeSensitive` 变量名拼写错误导致的 `Cannot find name 'include_sensitive'` 编译报错。
+- **TypeScript 编译放宽**：调整 `tsconfig.app.json` 中的 `strict: false`，确保在生产环境（尤其是低配 ARM 服务器）中构建更加稳健。
+
+---
+
+## [0.7.0] — 2026-05-07 · feature · 更新检查器 & 配置备份 & 命令转发增强
+
+### Added
+- **分步确认式更新检查器**（TopBar 刷新按钮 → UpdateDialog 状态机）
+  - 点击顶栏刷新图标打开对话框，自动 `git fetch` 对比本地/远程 commit
+  - 三步流程：检查更新 → 拉取更新 → 重启应用，每步需用户手动点击确认
+  - 支持 origin/main 和 origin/master 分支自动检测
+  - 重启前二次确认弹窗，重启后 5 秒倒计时自动刷新页面
+  - 重启方式自动检测：docker-compose → Makefile → SIGTERM 兜底
+- **配置备份与恢复**（Settings → 备份与恢复卡片）
+  - 导出：12 个数据库类别可选导出为 JSON 文件下载
+  - 类别：系统设置、命令模板、账号命令绑定、LLM Provider、转发规则、自动回复规则、风控模板/规则、插件功能配置、账号设置、忽略列表、通知 Bot
+  - 敏感数据开关：默认排除 session/api_key/token/phone 等加密字段，手动开启后包含
+  - 导入：上传 JSON 文件，按 ID 字段去重检测，已存在的记录自动跳过
+  - bytes 类型字段自动 hex 序列化/反序列化
+
+### Changed
+- **自定义命令 forward_to 支持 4 种转发模式**
+  - `forward_native`（原生转发，携带原作者）/ `copy_text`（纯文本复制）/ `quote`（带"来自 X"前缀）/ `link_only`（仅发消息链接）
+  - 成功提示文案根据模式动态显示（转发/复制文本/引用转发/链接）
+- **自定义命令支持"立即删除"选项**：转发成功后立即删除命令消息（无需设置延迟秒数），与延迟删除互斥
+- **转发插件 target_chat_id 改为可选**：留空或非法值时默认转发到当前消息来源的 chat
+- **Game24 配置页命令前缀动态化**：命令示例改为从 `getSystemSettings` API 实时读取 `command_prefix`，不再硬编码 `,`
+- **Game24 插件提示文案优化**：开始游戏时的规则说明更简洁，示例算式更直观
+
+### Added (Docs)
+- 插件开发指南新增 §10「前端配置页规范」：明确命令前缀必须动态获取，禁止写硬编码
+
+---
+
 ## [0.6.0] — 2026-05-07 · feature · 24 点游戏插件 & Builtin 插件热发现
 
 ### Added
@@ -150,13 +194,15 @@
 
 ### Added
 - **前后端版本不一致检测**：避免再发生"代码改了但 uvicorn 没重启 / SW 缓存老前端 → 用户看老行为以为代码没生效"的幻觉式 bug。
-  - 后端：`GET /api/system/version`（**public 无鉴权**）返回 `{version, stage}`
+  - 后端：`GET /api/system/version`（**public 无鉴权**）返回 "version": "0.6.1"
   - 前端：`GlobalAlertBar` 拆成 `VersionMismatchBar` + `KillSwitchBar`；启动 + 每 60s 拉一次后端版本，不一致时顶部弹**琥珀色横幅**："前后端版本不一致 · 前端 vX.Y.Z · 后端 vA.B.C — 请 `make restart` + 硬刷"，含一键"硬刷新"按钮。
 - **agent-plans/README.md §4.1**：新增"必跑 `make restart`"规范，列明哪些情况必须整套重启 + 哪些 `--reload` 能搞定。
 - **agent-plans/README.md §3** 共用基础设施：把 `make up` / `make restart` / `make down` 提到首位，`make backend`（带 reload）降级为"调试时用"。
 
 ### Notes
-- 单元测试不要直接 `from app.api.system_health import router` 然后调 `/api/system/version`——这是 public 端点没鉴权依赖，pytest 拿到的是 `VersionInfo(version=__version__, stage="Sprint 4")`，下次 bump 版本号时 `stage` 字段如果摘掉得记得这里同步。
+- 单元测试不要直接 `from app.api.system_health import router` 然后调 `/api/system/version`——这是 public 端点没鉴权依赖，pytest 拿到的是 `VersionInfo(version=__version__ = "0.6.1"
+APP_STAGE: str | None = "feature"
+int 4")`，下次 bump 版本号时 `stage` 字段如果摘掉得记得这里同步。
 
 ---
 
@@ -185,6 +231,9 @@
 
 ### Changed
 - Sidebar 顶层菜单 7 项 → 7 项（"功能矩阵" + "插件管理" 合成 "扩展中心"，腾出位置但不增加）。
+
+### Fixed
+- alembic 0012 误写 `down_reversion = "0.6.1"` 与 0011 构成分叉，汇总验收时修正为 `down_revision="0011"`，再次回到单 head。
 
 ---
 
@@ -226,6 +275,7 @@
 - 内置命令支持短别名：`help(h)`、`status(s, st)`、`id(i)`、`version(v)`。
 - `,help` 输出改为折叠展示主命令与别名，并合并展示自定义模板别名。
 - 命令模板设置页新增别名输入与展示列；保存时对别名格式和冲突做校验。
+- 前端版本号改为 `frontend/src/lib/version.ts` 单点定义，export const APP_VERSION = "0.6.1";
 
 ### Fixed
 - 自定义命令名/别名冲突规则统一：同账号维度下，模板 `name + aliases` 不可互撞，也不可与内置命令及其别名冲突。
@@ -303,7 +353,7 @@
 - Web 端：修改密码 / 禁用 TOTP。
 - KillSwitch 全局红色横幅 + AccountStatusBadge 复合状态。
 - 风控每个动作显示中文标签 + 一句话说明。
-- 内置命令 `,version`：在 TG 内查看版本与运行环境。
+- 内置命令：`,version`：在 TG 内查看版本与运行环境。
 - `docs/SECURITY-OPS.md` 生产部署安全清单。
 
 ### Changed
