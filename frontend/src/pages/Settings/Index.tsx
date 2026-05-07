@@ -25,6 +25,7 @@ import {
 import { getErrMsg, api } from "@/lib/api";
 import { NotifyBots } from "./NotifyBots";
 import { UserAccount } from "./UserAccount";
+import { ConfigBackup } from "./ConfigBackup";
 
 interface KillSwitchState {
   enabled: boolean;
@@ -187,6 +188,8 @@ export function SettingsIndex() {
               </div>
             </CardContent>
           </Card>
+
+          <ConfigBackup />
         </TabsContent>
 
         <TabsContent value="security">

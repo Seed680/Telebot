@@ -889,3 +889,22 @@ export interface BackendVersionInfo {
   version: string;
   stage: string | null;
 }
+
+// ===================== 检查更新 =====================
+export interface CheckUpdateResult {
+  has_update: boolean;
+  current_commit: string | null;
+  remote_commit: string | null;
+  ahead: number;
+  error: string | null;
+}
+export interface PullUpdateResult {
+  success: boolean;
+  new_commit: string | null;
+  summary: string | null;
+  error: string | null;
+}
+export interface RestartResult {
+  success: boolean;
+  error: string | null;
+}

@@ -176,7 +176,6 @@ export function ForwardConfig() {
       // payload.config 是 Record<string, unknown>，先 cast 到 unknown 再到 ForwardRuleConfig
       // 才能通过 strict TS 检查（同类型断言两步走）
       const cfg = payload.config as unknown as ForwardRuleConfig;
-      if (!cfg.target_chat_id) throw new Error("目标 chat_id 必填");
       if (cfg.source_kind === "keyword" && !(cfg.keyword || "").trim())
         throw new Error("关键词模式下 keyword 不能为空");
       if (cfg.source_kind === "peers" && !(cfg.source_peers?.length ?? 0))
@@ -465,14 +464,14 @@ export function ForwardConfig() {
               </Field>
             )}
 
-            <Field label="目标 chat_id（必填）">
+            <Field label="目标 chat_id（可选）">
               <Input
                 inputMode="numeric"
                 value={targetText}
                 onChange={(e) =>
                   setTargetText(e.target.value.replace(/[^0-9-]/g, ""))
                 }
-                placeholder="例：-1001234567890（你的收藏夹 / 团队群）"
+                placeholder="留空 = 转发到消息来源的 chat；例：-1001234567890"
               />
             </Field>
 

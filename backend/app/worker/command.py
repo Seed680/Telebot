@@ -423,31 +423,79 @@ async def _run_template(client, event, args, tpl: dict[str, Any], account_id: in
             except (ValueError, TypeError):
                 await event.edit("✗ 模板配置错误：target_chat_id 不是合法的整数")
                 return
+        # 按 mode 分支处理
+        mode = cfg.get("mode", "forward_native")
         try:
-            await replied.forward_to(target)
+            if mode == "forward_native":
+                await replied.forward_to(target)
+            elif mode == "copy_text":
+                text = replied.text or "(empty)"
+                await event.client.send_message(target, text)
+            elif mode == "quote":
+                try:
+                    src = await replied.get_chat()
+                except Exception:  # noqa: BLE001
+                    src = None
+                chat_label = (
+                    getattr(src, "title", None)
+                    or getattr(src, "username", None)
+                    or getattr(src, "first_name", None)
+                    or str(replied.chat_id if hasattr(replied, "chat_id") else "?")
+                )
+                body = f"📨 来自 {chat_label}\n\n{replied.text or '(no text)'}"
+                await event.client.send_message(target, body)
+            elif mode == "link_only":
+                # 为 replied 构造 link：取 replied 的 chat_id + message.id
+                cid = getattr(replied, "chat_id", None)
+                mid = getattr(replied, "id", None)
+                if cid and mid:
+                    sid = str(cid)
+                    if sid.startswith("-100"):
+                        link = f"https://t.me/c/{sid[4:]}/{mid}"
+                    else:
+                        link = f"消息引用：chat={cid}, id={mid}"
+                else:
+                    link = f"消息引用：无法生成链接"
+                await event.client.send_message(target, link)
+            else:
+                await event.edit(f"✗ 未知转发方式：{mode}")
+                return
         except Exception as e:  # noqa: BLE001
             await event.edit(f"✗ 转发失败：{type(e).__name__}: {str(e)[:80]}")
             return
-        await event.edit(f"✓ 已转发到 {target}")
-        # 自动删除命令消息（可选，单位秒）
-        delete_after_raw = cfg.get("delete_after")
-        if delete_after_raw:
-            try:
-                seconds = int(delete_after_raw)
-            except (ValueError, TypeError):
-                seconds = 0
-            if seconds > 0:
-                import asyncio as _aio
+        mode_label = {"forward_native": "转发", "copy_text": "复制文本", "quote": "引用转发", "link_only": "链接"}.get(mode, mode)
+        await event.edit(f"✓ 已{mode_label}到 {target}")
+        # 自动删除命令消息
+        delete_immediately = cfg.get("delete_immediately")
+        if delete_immediately:
+            import asyncio as _aio
 
-                async def _delete_later() -> None:
-                    try:
-                        await _aio.sleep(seconds)
-                        await event.delete()
-                    except Exception:  # noqa: BLE001
-                        # TG 端权限/网络异常都不影响主流程
-                        pass
+            async def _delete_now() -> None:
+                try:
+                    await event.delete()
+                except Exception:  # noqa: BLE001
+                    pass
 
-                _aio.create_task(_delete_later())
+            _aio.create_task(_delete_now())
+        else:
+            delete_after_raw = cfg.get("delete_after")
+            if delete_after_raw:
+                try:
+                    seconds = int(delete_after_raw)
+                except (ValueError, TypeError):
+                    seconds = 0
+                if seconds > 0:
+                    import asyncio as _aio
+
+                    async def _delete_later() -> None:
+                        try:
+                            await _aio.sleep(seconds)
+                            await event.delete()
+                        except Exception:  # noqa: BLE001
+                            # TG 端权限/网络异常都不影响主流程
+                            pass
+
+                    _aio.create_task(_delete_later())
         return
 
     if t == "ai":

@@ -1,9 +1,10 @@
-// 顶栏：移动端汉堡按钮 + 副标题（仅 sm+ 显示）+ 系统健康灯 + 紧急停用 + 登出
+// 顶栏：移动端汉堡按钮 + 副标题（仅 sm+ 显示）+ 系统健康灯 + 更新检查 + 紧急停用 + 登出
 // iOS PWA：背景色延伸到 safe-area-inset-top（与 black-translucent 状态栏配合），
 // 内容区高度仍维持 56px。
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { LogOut, Menu, UserCircle } from "lucide-react";
+import { LogOut, Menu, RefreshCw, UserCircle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -16,6 +17,7 @@ import {
 import { logout } from "@/lib/auth";
 import { HealthDot } from "@/components/HealthDot";
 import { KillSwitch } from "./KillSwitch";
+import { UpdateDialog } from "./UpdateDialog";
 
 interface TopBarProps {
   username: string;
@@ -25,6 +27,7 @@ interface TopBarProps {
 export function TopBar({ username, onMenuClick }: TopBarProps) {
   const nav = useNavigate();
   const qc = useQueryClient();
+  const [updateOpen, setUpdateOpen] = useState(false);
   const mut = useMutation({
     mutationFn: logout,
     onSettled: () => {
@@ -60,6 +63,16 @@ export function TopBar({ username, onMenuClick }: TopBarProps) {
       </div>
       <div className="flex shrink-0 items-center gap-1 sm:gap-2">
         <HealthDot />
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => setUpdateOpen(true)}
+          aria-label="检查更新"
+          title="检查更新"
+        >
+          <RefreshCw className="h-4 w-4" />
+        </Button>
+        <UpdateDialog open={updateOpen} onOpenChange={setUpdateOpen} />
         <KillSwitch />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>

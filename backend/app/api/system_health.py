@@ -13,10 +13,14 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from collections import Counter
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, UploadFile, File
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 
@@ -304,6 +308,458 @@ async def get_health_overview(_user: CurrentUser) -> HealthOverview:
         proxies=proxies,
         workers=workers,
     )
+
+
+# ════════════════════════════════════════════════════════════
+# 检查更新 / 拉取更新 / 重启（分步确认式）
+# ════════════════════════════════════════════════════════════
+
+
+def _git_root() -> Path | None:
+    """返回项目 git 仓库根目录（含 .git），找不到返回 None。"""
+    try:
+        p = Path(__file__).resolve()
+        for parent in (p, *p.parents):
+            if (parent / ".git").exists():
+                return parent
+    except Exception:
+        pass
+    return None
+
+
+def _run_git(*args: str, timeout: int = 30) -> tuple[str, str, int]:
+    """同步执行 git 命令，返回 (stdout, stderr, returncode)。"""
+    root = _git_root()
+    if not root:
+        return "", "git root not found", 1
+    try:
+        result = subprocess.run(
+            ["git"] + list(args),
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return result.stdout.strip(), result.stderr.strip(), result.returncode
+    except subprocess.TimeoutExpired:
+        return "", "git command timed out", 1
+    except Exception as e:
+        return "", str(e), 1
+
+
+class CheckUpdateResponse(BaseModel):
+    has_update: bool = False
+    current_commit: str | None = None
+    remote_commit: str | None = None
+    ahead: int = 0
+    error: str | None = None
+
+
+class PullUpdateResponse(BaseModel):
+    success: bool = False
+    new_commit: str | None = None
+    summary: str | None = None
+    error: str | None = None
+
+
+class RestartResponse(BaseModel):
+    success: bool = False
+    error: str | None = None
+
+
+@router.post("/check-update", response_model=CheckUpdateResponse)
+async def check_update(_user: CurrentUser) -> CheckUpdateResponse:
+    """仅 git fetch + 对比本地/远程 commit，不拉取代码。"""
+    try:
+        fetch_out, fetch_err, fetch_rc = await asyncio.to_thread(
+            _run_git, "fetch", "origin", timeout=30
+        )
+        if fetch_rc != 0:
+            return CheckUpdateResponse(error=f"git fetch 失败: {fetch_err or fetch_out}")
+
+        head_out, _, head_rc = await asyncio.to_thread(
+            _run_git, "rev-parse", "HEAD", timeout=10
+        )
+        if head_rc != 0:
+            return CheckUpdateResponse(error="无法获取当前 commit")
+
+        remote_out, _, remote_rc = await asyncio.to_thread(
+            _run_git, "rev-parse", "origin/main", timeout=10
+        )
+        if remote_rc != 0:
+            # 尝试 origin/master 作为 fallback
+            remote_out, _, remote_rc = await asyncio.to_thread(
+                _run_git, "rev-parse", "origin/master", timeout=10
+            )
+        if remote_rc != 0:
+            return CheckUpdateResponse(error="无法获取远程 commit（origin/main 或 origin/master）")
+
+        current = head_out[:12]
+        remote = remote_out[:12]
+        has_update = head_out != remote_out
+
+        # 计算 ahead（本地落后远程多少个 commit）
+        ahead_out, _, ahead_rc = await asyncio.to_thread(
+            _run_git, "rev-list", "--count", f"{remote_out}..{head_out}", timeout=10
+        )
+        behind_out, _, _ = await asyncio.to_thread(
+            _run_git, "rev-list", "--count", f"{head_out}..{remote_out}", timeout=10
+        )
+        behind = int(behind_out) if not _ else 0
+
+        return CheckUpdateResponse(
+            has_update=has_update and behind > 0,
+            current_commit=current,
+            remote_commit=remote,
+            ahead=behind,
+        )
+    except Exception as e:  # noqa: BLE001
+        return CheckUpdateResponse(error=f"{type(e).__name__}: {str(e)[:200]}")
+
+
+@router.post("/pull-update", response_model=PullUpdateResponse)
+async def pull_update(_user: CurrentUser) -> PullUpdateResponse:
+    """仅执行 git pull，不重启。"""
+    try:
+        out, err, rc = await asyncio.to_thread(
+            _run_git, "pull", "origin", "main", timeout=60
+        )
+        if rc != 0:
+            # 尝试 master
+            out, err, rc = await asyncio.to_thread(
+                _run_git, "pull", "origin", "master", timeout=60
+            )
+        if rc != 0:
+            return PullUpdateResponse(error=f"git pull 失败: {err or out}")
+
+        # 获取最新 commit
+        head_out, _, _ = await asyncio.to_thread(
+            _run_git, "rev-parse", "HEAD", timeout=10
+        )
+        # 获取简短 summary
+        summary_out, _, _ = await asyncio.to_thread(
+            _run_git, "log", "-1", "--oneline", timeout=10
+        )
+
+        return PullUpdateResponse(
+            success=True,
+            new_commit=head_out[:12] if head_out else None,
+            summary=summary_out or None,
+        )
+    except Exception as e:  # noqa: BLE001
+        return PullUpdateResponse(error=f"{type(e).__name__}: {str(e)[:200]}")
+
+
+@router.post("/restart", response_model=RestartResponse)
+async def restart_app(_user: CurrentUser) -> RestartResponse:
+    """触发应用重启。使用 subprocess detach 避免阻塞当前进程。"""
+    try:
+        root = _git_root()
+        if not root:
+            return RestartResponse(error="git root not found")
+
+        # 检测运行方式：有 docker-compose.yml 用 docker，否则用 make
+        compose = root / "docker-compose.yml"
+        makefile = root / "Makefile"
+
+        if compose.exists():
+            cmd = ["docker", "compose", "restart"]
+        elif makefile.exists():
+            cmd = ["make", "restart"]
+        else:
+            # 直接杀进程，依赖 systemd/docker 等外部重启机制
+            import os
+            import signal
+
+            os.kill(os.getpid(), signal.SIGTERM)
+            return RestartResponse(success=True)
+
+        subprocess.Popen(
+            cmd,
+            cwd=str(root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return RestartResponse(success=True)
+    except Exception as e:  # noqa: BLE001
+        return RestartResponse(error=f"{type(e).__name__}: {str(e)[:200]}")
+
+
+# ════════════════════════════════════════════════════════════
+# 配置备份与导出 / 导入
+# ════════════════════════════════════════════════════════════
+
+# 每个类别定义：ORM 模型、序列化时排除的敏感字段、标识字段（用于去重）
+_EXPORT_DEFS: dict[str, dict[str, Any]] = {
+    "system_settings": {
+        "model": "SystemSetting",
+        "exclude_fields": set(),
+        "id_fields": {"key"},
+    },
+    "command_templates": {
+        "model": "CommandTemplate",
+        "exclude_fields": set(),
+        "id_fields": {"name"},
+    },
+    "account_commands": {
+        "model": "AccountCommandLink",
+        "exclude_fields": set(),
+        "id_fields": {"account_id", "template_id"},
+    },
+    "llm_providers": {
+        "model": "LLMProvider",
+        "exclude_fields": {"api_key_enc"},
+        "id_fields": {"name"},
+    },
+    "forward_rules": {
+        "model": "Rule",
+        "exclude_fields": set(),
+        "filter": {"feature_key": "forward"},
+        "id_fields": {"account_id", "feature_key", "name"},
+    },
+    "auto_reply_rules": {
+        "model": "Rule",
+        "exclude_fields": set(),
+        "filter": {"feature_key": "auto_reply"},
+        "id_fields": {"account_id", "feature_key", "name"},
+    },
+    "rate_limit_templates": {
+        "model": "RateLimitTemplate",
+        "exclude_fields": set(),
+        "id_fields": {"name"},
+    },
+    "rate_limit_rules": {
+        "model": "RateLimitRule",
+        "exclude_fields": set(),
+        "id_fields": {"scope", "scope_id", "action"},
+    },
+    "feature_config": {
+        "model": "AccountFeature",
+        "exclude_fields": set(),
+        "id_fields": {"account_id", "feature_key"},
+    },
+    "account_settings": {
+        "model": "Account",
+        "exclude_fields": {"session_enc", "api_id_enc", "api_hash_enc", "phone"},
+        "id_fields": {"id"},
+    },
+    "ignored_peers": {
+        "model": "IgnoredPeer",
+        "exclude_fields": set(),
+        "id_fields": {"account_id", "peer_id"},
+    },
+    "notify_bots": {
+        "model": "NotifyBot",
+        "exclude_fields": {"bot_token_enc"},
+        "id_fields": {"name"},
+    },
+}
+
+# 敏感字段的完整集合（include_sensitive=true 时不排除）
+_ALL_SENSITIVE = {"session_enc", "api_key_enc", "api_id_enc", "api_hash_enc", "phone", "bot_token_enc", "password_enc"}
+
+
+class ExportConfigRequest(BaseModel):
+    categories: list[str] = Field(default_factory=list)
+    include_sensitive: bool = False
+
+
+def _row_to_dict(row: Any, exclude: set[str], include_sensitive: bool) -> dict[str, Any]:
+    """将 ORM 行转为 dict，排除指定字段。"""
+    data = {}
+    for col in row.__table__.columns:
+        name = col.name
+        if include_sensitive or name not in exclude:
+            val = getattr(row, name)
+            # 处理不可序列化的类型
+            if hasattr(val, "isoformat"):
+                val = val.isoformat()
+            elif isinstance(val, (bytes, bytearray)):
+                val = val.hex() if include_sensitive else None
+            data[name] = val
+    return {k: v for k, v in data.items() if v is not None}
+
+
+@router.post("/export-config")
+async def export_config(
+    _user: CurrentUser,
+    body: ExportConfigRequest,
+) -> JSONResponse:
+    """导出配置为 JSON 文件下载。"""
+    from .. import __version__
+    from ..db.models import (
+        Account, AccountCommandLink, AccountFeature, CommandTemplate,
+        IgnoredPeer, LLMProvider, NotifyBot, RateLimitRule,
+        RateLimitTemplate, Rule,
+    )
+    from ..db.models.system import SystemSetting
+
+    model_map = {
+        "SystemSetting": SystemSetting,
+        "CommandTemplate": CommandTemplate,
+        "AccountCommandLink": AccountCommandLink,
+        "LLMProvider": LLMProvider,
+        "Rule": Rule,
+        "RateLimitTemplate": RateLimitTemplate,
+        "RateLimitRule": RateLimitRule,
+        "AccountFeature": AccountFeature,
+        "Account": Account,
+        "IgnoredPeer": IgnoredPeer,
+        "NotifyBot": NotifyBot,
+    }
+
+    result: dict[str, Any] = {
+        "_meta": {
+            "version": __version__,
+            "exported_at": datetime.now().isoformat(),
+            "include_sensitive": body.include_sensitive,
+        },
+    }
+
+    for cat in body.categories:
+        defn = _EXPORT_DEFS.get(cat)
+        if not defn:
+            continue
+        model_cls = model_map.get(defn["model"])
+        if not model_cls:
+            continue
+
+        exclude = defn["exclude_fields"]
+        if body.include_sensitive:
+            exclude = set()
+
+        try:
+            async with AsyncSessionLocal() as db:
+                query = select(model_cls)
+                filt = defn.get("filter")
+                if filt:
+                    for k, v in filt.items():
+                        query = query.where(getattr(model_cls, k) == v)
+                rows = (await db.execute(query)).scalars().all()
+                result[cat] = [_row_to_dict(r, exclude, body.include_sensitive) for r in rows]
+        except Exception as e:  # noqa: BLE001
+            result[cat] = {"_error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+    filename = f"telebot-config-{datetime.now().strftime('%Y-%m-%d')}.json"
+    return JSONResponse(
+        content=result,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+class ImportConfigResponse(BaseModel):
+    imported: int = 0
+    skipped: int = 0
+    warnings: list[str] = Field(default_factory=list)
+
+
+@router.post("/import-config", response_model=ImportConfigResponse)
+async def import_config(
+    _user: CurrentUser,
+    file: UploadFile = File(...),
+) -> ImportConfigResponse:
+    """从上传的 JSON 文件导入配置。冲突策略：同名/同 ID 跳过并记录。"""
+    import io
+    import json as _json
+
+    from ..db.models import (
+        Account, AccountCommandLink, AccountFeature, CommandTemplate,
+        IgnoredPeer, LLMProvider, NotifyBot, RateLimitRule,
+        RateLimitTemplate, Rule,
+    )
+    from ..db.models.system import SystemSetting
+
+    model_map = {
+        "SystemSetting": SystemSetting,
+        "CommandTemplate": CommandTemplate,
+        "AccountCommandLink": AccountCommandLink,
+        "LLMProvider": LLMProvider,
+        "Rule": Rule,
+        "RateLimitTemplate": RateLimitTemplate,
+        "RateLimitRule": RateLimitRule,
+        "AccountFeature": AccountFeature,
+        "Account": Account,
+        "IgnoredPeer": IgnoredPeer,
+        "NotifyBot": NotifyBot,
+    }
+
+    content = await file.read()
+    try:
+        data = _json.loads(content)
+    except Exception:
+        return ImportConfigResponse(warnings=["上传的文件不是合法的 JSON"])
+
+    meta = data.pop("_meta", {})
+    imported = 0
+    skipped = 0
+    warnings: list[str] = []
+
+    for cat, rows in data.items():
+        defn = _EXPORT_DEFS.get(cat)
+        if not defn or not isinstance(rows, list):
+            if isinstance(rows, dict) and "_error" in rows:
+                warnings.append(f"[{cat}] 导出时出错: {rows['_error']}")
+            continue
+
+        model_cls = model_map.get(defn["model"])
+        if not model_cls:
+            continue
+
+        id_fields = defn["id_fields"]
+        exclude = defn["exclude_fields"]
+        include_sensitive = meta.get("include_sensitive", False)
+        if include_sensitive:
+            exclude = set()
+
+        try:
+            async with AsyncSessionLocal() as db:
+                for row_data in rows:
+                    if not isinstance(row_data, dict):
+                        continue
+                    # 检查是否已存在（按 id_fields 判断冲突）
+                    exists_query = select(model_cls)
+                    for f in id_fields:
+                        if f in row_data:
+                            exists_query = exists_query.where(
+                                getattr(model_cls, f) == row_data[f]
+                            )
+                    existing = (await db.execute(exists_query.limit(1))).scalar_one_or_none()
+                    if existing is not None:
+                        skipped += 1
+                        continue
+
+                    # 过滤排除字段 + 不允许覆盖 id 等自动生成字段
+                    auto_fields = {"id", "created_at", "updated_at"}
+                    filtered = {
+                        k: v for k, v in row_data.items()
+                        if k not in exclude and k not in auto_fields
+                    }
+
+                    # hex 字符串转回 bytes（session_enc）
+                    for k, v in list(filtered.items()):
+                        col_type = getattr(model_cls.__table__.c, k, None)
+                        if col_type and hasattr(col_type.type, "python_type"):
+                            try:
+                                py_type = col_type.type.python_type
+                                if py_type is bytes and isinstance(v, str):
+                                    filtered[k] = bytes.fromhex(v)
+                            except Exception:
+                                pass
+
+                    try:
+                        new_row = model_cls(**filtered)
+                        db.add(new_row)
+                        imported += 1
+                    except Exception as exc:  # noqa: BLE001
+                        warnings.append(f"[{cat}] 插入失败: {str(exc)[:100]}")
+
+                await db.commit()
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"[{cat}] 批量导入失败: {str(exc)[:200]}")
+
+    return ImportConfigResponse(imported=imported, skipped=skipped, warnings=warnings)
 
 
 __all__ = ["router"]

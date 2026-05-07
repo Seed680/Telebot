@@ -360,7 +360,37 @@ installed 插件默认拿到的是 `SandboxClient` 而不是真实 `TelegramClie
 
 ---
 
-## 10. 调试建议
+## 10. 前端配置页规范
+
+插件的前端配置页（`frontend/src/pages/Features/` 下）需要注意以下规范：
+
+### 10.1 命令前缀必须动态获取
+
+如果配置页中需要展示命令示例（如 `{前缀}{指令名} 参数`），**禁止写死前缀字符**（如 `,`、`/`）。必须通过 `getSystemSettings` API 实时读取 `command_prefix`，保证与系统设置始终一致。
+
+```tsx
+import { getSystemSettings } from "@/api/system";
+
+// 在组件内
+const settingsQ = useQuery({
+  queryKey: ["system", "settings"],
+  queryFn: getSystemSettings,
+});
+const cmdPrefix = settingsQ.data?.command_prefix || ",";
+
+// 展示时
+<code>{cmdPrefix}{command} 参数</code>
+```
+
+### 10.2 其他注意事项
+
+- 配置说明、使用说明中所有涉及命令前缀的地方都要用 `cmdPrefix` 变量拼接
+- 如果用户修改了自定义指令名（如 `command` 配置项），示例中的指令名也要同步使用当前输入值
+- 参考 `CommandTemplates.tsx` 和 `Game24Config.tsx` 的实现方式
+
+---
+
+## 11. 调试建议
 
 快速自检清单：
 - `__init__.py` 是否导出 `PLUGIN_CLASS` 和 `MANIFEST`
@@ -376,7 +406,7 @@ installed 插件默认拿到的是 `SandboxClient` 而不是真实 `TelegramClie
 
 ---
 
-## 11. 版本与兼容建议
+## 12. 版本与兼容建议
 
 建议语义化版本：
 - `0.x`：开发阶段，允许快速迭代
@@ -389,7 +419,7 @@ installed 插件默认拿到的是 `SandboxClient` 而不是真实 `TelegramClie
 
 ---
 
-## 12. 安全与合规建议
+## 13. 安全与合规建议
 
 - 不要把明文 key 写入日志
 - 不要把完整隐私消息持久化到外部系统
@@ -398,7 +428,7 @@ installed 插件默认拿到的是 `SandboxClient` 而不是真实 `TelegramClie
 
 ---
 
-## 13. 最小可运行模板
+## 14. 最小可运行模板
 
 ```python
 # plugin.py

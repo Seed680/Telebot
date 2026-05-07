@@ -4,10 +4,13 @@ import type {
   AccountRateLimitOut,
   AuditLogItem,
   BackendVersionInfo,
+  CheckUpdateResult,
   HealthOverview,
   HumanizeConfig,
   HumanizeUpdate,
+  PullUpdateResult,
   RateLimitRuleConfig,
+  RestartResult,
   StrictRequest,
   RuntimeLogItem,
   SystemSettings,
@@ -146,5 +149,19 @@ export async function patchHumanize(
 // ===================== 系统健康概览（Dashboard 用）=====================
 export async function getHealthOverview(): Promise<HealthOverview> {
   const { data } = await api.get<HealthOverview>("/api/system/health-overview");
+  return data;
+}
+
+// ===================== 检查更新 / 拉取 / 重启 =====================
+export async function checkUpdate(): Promise<CheckUpdateResult> {
+  const { data } = await api.post<CheckUpdateResult>("/api/system/check-update");
+  return data;
+}
+export async function pullUpdate(): Promise<PullUpdateResult> {
+  const { data } = await api.post<PullUpdateResult>("/api/system/pull-update");
+  return data;
+}
+export async function restartApp(): Promise<RestartResult> {
+  const { data } = await api.post<RestartResult>("/api/system/restart");
   return data;
 }

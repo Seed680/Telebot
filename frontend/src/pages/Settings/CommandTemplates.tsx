@@ -159,6 +159,10 @@ interface FormState {
   target_chat_id: string;
   /** forward_to：触发命令后多少秒删命令消息（空 / 0 = 不删） */
   forward_delete_after: string;
+  /** forward_to：成功后立即删除命令消息（不等待） */
+  forward_delete_immediately: boolean;
+  /** forward_to：转发方式（forward_native/copy_text/quote/link_only） */
+  forward_mode: string;
   plugin_key: string;
   plugin_method: string;
   plugin_args: string; // JSON string
@@ -189,6 +193,8 @@ const EMPTY_FORM: FormState = {
   text: "",
   target_chat_id: "",
   forward_delete_after: "",
+  forward_delete_immediately: false,
+  forward_mode: "forward_native",
   plugin_key: "",
   plugin_method: "",
   plugin_args: "[]",
@@ -223,6 +229,8 @@ function formFromTemplate(t: CommandTemplateOut): FormState {
       cfg.delete_after !== undefined && cfg.delete_after !== null
         ? String(cfg.delete_after)
         : "",
+    forward_delete_immediately: !!cfg.delete_immediately,
+    forward_mode: typeof cfg.mode === "string" ? (cfg.mode as string) : "forward_native",
     plugin_key: typeof cfg.plugin_key === "string" ? (cfg.plugin_key as string) : "",
     plugin_method: typeof cfg.method === "string" ? (cfg.method as string) : "",
     plugin_args: cfg.args ? JSON.stringify(cfg.args) : "[]",
@@ -292,13 +300,20 @@ function buildPayload(form: FormState): {
       if (!Number.isInteger(n)) return { ok: false, errMsg: "target_chat_id 必须是整数" };
       cfg.target_chat_id = n;
     }
-    const da = form.forward_delete_after.trim();
-    if (da) {
-      const n = Number(da);
-      if (!Number.isInteger(n) || n < 0 || n > 3600) {
-        return { ok: false, errMsg: "自动删除秒数必须是 0~3600 的整数" };
+    if (form.forward_mode && form.forward_mode !== "forward_native") {
+      cfg.mode = form.forward_mode;
+    }
+    if (form.forward_delete_immediately) {
+      cfg.delete_immediately = true;
+    } else {
+      const da = form.forward_delete_after.trim();
+      if (da) {
+        const n = Number(da);
+        if (!Number.isInteger(n) || n < 0 || n > 3600) {
+          return { ok: false, errMsg: "自动删除秒数必须是 0~3600 的整数" };
+        }
+        if (n > 0) cfg.delete_after = n;
       }
-      if (n > 0) cfg.delete_after = n;
     }
     return { ok: true, aliases, config: cfg };
   }
@@ -737,23 +752,51 @@ function CommandEditDialog({
                 </p>
               </div>
               <div className="space-y-1.5">
-                <Label>触发后自动删除命令消息（秒，可选）</Label>
-                <Input
-                  inputMode="numeric"
-                  value={form.forward_delete_after}
-                  maxLength={5}
-                  onChange={(e) =>
-                    setField(
-                      "forward_delete_after",
-                      e.target.value.replace(/[^\d]/g, ""),
-                    )
-                  }
-                  placeholder="留空或 0 = 不删；如 5 = 5 秒后删命令消息"
-                />
+                <Label>转发方式</Label>
+                <Select
+                  value={form.forward_mode}
+                  onChange={(e) => setField("forward_mode", e.target.value)}
+                >
+                  <option value="forward_native">原生转发（携带原作者）</option>
+                  <option value="copy_text">复制文本（不显示原作者）</option>
+                  <option value="quote">引用包装（带"来自 X"前缀）</option>
+                  <option value="link_only">仅发链接（公开群可点）</option>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <Label>成功后立即删除命令消息</Label>
+                  <Switch
+                    checked={form.forward_delete_immediately}
+                    onCheckedChange={(v) =>
+                      setField("forward_delete_immediately", v)
+                    }
+                  />
+                </div>
                 <p className="text-xs text-muted-foreground">
-                  转发成功后等待 N 秒，删除你刚发的 <code>{cmdPrefix}{form.name || "name"}</code> 命令消息（不影响转过去的内容）。范围 0–3600；不删保留 ✓ 提示。
+                  开启后，命令触发成功后立即删除你发的 <code>{cmdPrefix}{form.name || "name"}</code> 命令消息（不影响转发/回复的内容）。
                 </p>
               </div>
+              {!form.forward_delete_immediately && (
+                <div className="space-y-1.5">
+                  <Label>触发后自动删除命令消息（秒，可选）</Label>
+                  <Input
+                    inputMode="numeric"
+                    value={form.forward_delete_after}
+                    maxLength={5}
+                    onChange={(e) =>
+                      setField(
+                        "forward_delete_after",
+                        e.target.value.replace(/[^\d]/g, ""),
+                      )
+                    }
+                    placeholder="留空或 0 = 不删；如 5 = 5 秒后删命令消息"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    转发成功后等待 N 秒，删除你刚发的 <code>{cmdPrefix}{form.name || "name"}</code> 命令消息（不影响转过去的内容）。范围 0–3600；不删保留 ✓ 提示。
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
