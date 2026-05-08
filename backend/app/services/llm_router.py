@@ -285,23 +285,30 @@ async def _ask_classifier(
     replied_text: str | None,
 ) -> str | None:
     """调 classifier provider 返回一个 label；任何错误返回 None。"""
-    # 局部 import 避免与 worker 启动顺序耦合
     from ..db.models.command import LLMProvider as LLMProviderModel
     from .llm_client import LLMError, build_client
 
-    # 把 dict 反捏成一个临时 ORM 实例（不绑 session），与 worker.command._run_ai 同一手法
-    fake_row = LLMProviderModel(
+    # 使用 LLMProviderDTO 替代手搓 fake ORM row
+    from .llm_dto import LLMProviderDTO
+
+    dto = LLMProviderDTO(
         id=int(classifier_provider.get("id") or 0),
         name=str(classifier_provider.get("name", "")),
         provider=str(classifier_provider.get("provider", "")),
-        api_key_enc=classifier_provider.get("api_key_enc"),
+        api_format=classifier_provider.get("api_format"),  # 修复：补充 api_format
         base_url=classifier_provider.get("base_url"),
         default_model=str(classifier_provider.get("default_model", "")),
+        api_key_enc=classifier_provider.get("api_key_enc"),
+        proxy_url=classifier_provider.get("proxy_url"),  # 修复：补充 proxy_url
     )
+
     # 把"原文 + 问题"压成短摘要送进去；max_tokens=8 防滥调
     blob = (replied_text or "")[:300] + "\n---\n" + (user_q or "")[:200]
     try:
-        cli = build_client(fake_row, proxy_url=classifier_provider.get("proxy_url"))
+        cli = build_client(
+            _dto_to_fake_row(dto),
+            proxy_url=dto.proxy_url,
+        )
         result = await cli.complete(_CLASSIFIER_SYSTEM, blob, max_tokens=8)
     except (LLMError, ValueError, Exception) as e:  # noqa: BLE001
         log.debug("classifier call failed: %s", type(e).__name__)
@@ -312,6 +319,21 @@ async def _ask_classifier(
     if label in _CLASSIFIER_LABELS:
         return label
     return None
+
+
+def _dto_to_fake_row(dto) -> "LLMProviderModel":  # type: ignore[name-defined]
+    """将 LLMProviderDTO 转为临时 ORM 行（向后兼容）。"""
+    from ..db.models.command import LLMProvider as LLMProviderModel
+
+    return LLMProviderModel(
+        id=dto.id,
+        name=dto.name,
+        provider=dto.provider,
+        api_key_enc=dto.api_key_enc,
+        base_url=dto.base_url,
+        default_model=dto.default_model,
+        api_format=dto.api_format,
+    )
 
 
 # ════════════════════════════════════════════════════════════

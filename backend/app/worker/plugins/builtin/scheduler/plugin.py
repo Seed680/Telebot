@@ -14,6 +14,7 @@ from app.db.models.command import LLMProvider
 from app.db.models.feature import FEATURE_SCHEDULER
 from app.db.models.rule import Rule
 from app.services.llm_client import LLMError, build_client
+from app.services.llm_dto import LLMProviderDTO
 from app.worker.plugins.base import Plugin, PluginContext, register
 
 _TICK_SECONDS = 30
@@ -192,12 +193,19 @@ class SchedulerPlugin(Plugin):
         row = await self._get_provider_row(provider_id)
         if row is None:
             raise ValueError(f"provider_id={provider_id} not found")
-        llm = build_client(row, override_model=action.get("model"))
+
+        # 使用 LLMProviderDTO 确保 api_format/proxy_url 等字段正确传递
+        dto = LLMProviderDTO.from_orm_row(row)
 
         system_prompt = str(action.get("system_prompt") or "你是简洁有用的中文助手。")
         max_tokens = _to_positive_int(action.get("max_tokens")) or 256
 
         try:
+            llm = build_client(
+                _dto_to_fake_row(dto),
+                override_model=action.get("model"),
+                proxy_url=dto.proxy_url,
+            )
             result = await llm.complete(system_prompt, prompt, max_tokens=max_tokens)
         except LLMError:
             raise
@@ -205,6 +213,19 @@ class SchedulerPlugin(Plugin):
         text = (result.text or "").strip() or "(empty)"
         target = int(action["target_chat_id"])
         await self._send_with_ratelimit(ctx, target, text[:_MAX_MESSAGE_LEN])
+
+
+    async def _get_provider_row(self, provider_id: int) -> LLMProvider | None:
+        async with AsyncSessionLocal() as db:
+            return await db.get(LLMProvider, provider_id)
+
+    async def _persist_rule_config(self, rid: int, cfg: dict[str, Any]) -> None:
+        async with AsyncSessionLocal() as db:
+            row = await db.get(Rule, rid)
+            if row is None:
+                return
+            row.config = cfg
+            await db.commit()
 
     async def _send_with_ratelimit(self, ctx: PluginContext, peer: int | str, text: str) -> None:
         peer_id = int(peer) if isinstance(peer, int) else None
@@ -223,25 +244,28 @@ class SchedulerPlugin(Plugin):
         try:
             await ctx.client.send_message(peer, text)
         except FloodWaitError as exc:
-            await ctx.engine.on_flood_wait("send_message_group", exc, peer_id=peer_id)
+            # FloodWaitError 参数匹配修复：
+            # engine.on_flood_wait(action, exc) 只接受 2 个参数，
+            # 不需要传 peer_id（该参数已在 engine 内部通过 action 区分）
+            await ctx.engine.on_flood_wait("send_message_group", exc)
             await asyncio.sleep(min(int(getattr(exc, "seconds", 0) or 0), 60))
             await ctx.client.send_message(peer, text)
-
-    async def _get_provider_row(self, provider_id: int) -> LLMProvider | None:
-        async with AsyncSessionLocal() as db:
-            return await db.get(LLMProvider, provider_id)
-
-    async def _persist_rule_config(self, rid: int, cfg: dict[str, Any]) -> None:
-        async with AsyncSessionLocal() as db:
-            row = await db.get(Rule, rid)
-            if row is None:
-                return
-            row.config = cfg
-            await db.commit()
 
 
 PLUGIN_CLASS = SchedulerPlugin
 
+
+def _dto_to_fake_row(dto: LLMProviderDTO) -> LLMProvider:
+    """将 LLMProviderDTO 转为 ORM 行（向后兼容 build_client）。"""
+    return LLMProvider(
+        id=dto.id,
+        name=dto.name,
+        provider=dto.provider,
+        api_key_enc=dto.api_key_enc,
+        base_url=dto.base_url,
+        default_model=dto.default_model,
+        api_format=dto.api_format,
+    )
 
 
 def _parse_dt(raw: Any) -> datetime | None:

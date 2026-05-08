@@ -1,10 +1,15 @@
 """账号级插件加载器：连接 Telethon、实例化每个启用的 [账号 × feature] 插件，并维护其生命周期。
 
+安全设计（阶段 E）：
+- 双开关检查：RemotePlugin.enabled AND AccountFeature.enabled 都为 true 才加载
+- 插件命令注册表：追踪 owner/plugin_key/generation，插件 reload/disable 时自动注销
+- on_shutdown 保证调用（幂等设计）
+
 使用流程：
 1. ``run_worker`` 在 ``client.connect()`` 前调 ``load_plugins_for_account``，本模块会：
    - 触发内置插件 import（``@register`` 写入全局注册表）
    - 在 ``client`` 上挂全局 ``NewMessage`` 派发器（incoming + outgoing），按各插件的 ``message_channels`` 声明过滤
-   - 实例化该账号当前 ``account_feature.enabled=True`` 的所有插件，并把状态写回为 active
+   - 实例化该账号当前 RemotePlugin.enabled=True AND AccountFeature.enabled=True 的所有插件，并把状态写回为 active
 2. 主进程通过 IPC ``CMD_RELOAD_CONFIG`` 触发 ``reload_account_config`` 实现热更新（拉新 rules / config，
    并对新增 / 移除的 feature 做差量加载与卸载）
 3. ``CMD_RELOAD_PLUGIN`` 调 ``reload_plugin``：``importlib.reload`` 单个内置插件模块并重新激活
@@ -41,10 +46,11 @@ from ...db.models.feature import (
     AccountFeature,
 )
 from ...db.models.ignored_peer import IgnoredPeer
+from ...db.models.remote_plugin import RemotePlugin
 from ...db.models.rule import Rule
 from ...redis_client import get_redis
 from ...services.rate_limit_service import get_effective
-from ..command import register_plugin_command
+from ..command import register_plugin_command, unregister_plugin_command
 from ..ipc import RUNTIME_LOG_STREAM, RuntimeLogPayload
 from ..ratelimit.engine import RateLimitEngine
 from ..ratelimit.humanize import HumanizeOpts
@@ -361,10 +367,22 @@ async def load_plugins_for_account(
 
 
 # ─────────────────────────────────────────────────────
-# 单 feature 激活
+# 单 feature 激活（安全：双开关检查）
 # ─────────────────────────────────────────────────────
 async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) -> None:
-    """根据 ``account_feature`` 行实例化对应插件，调 ``on_startup``，写状态。"""
+    """根据 ``account_feature`` 行实例化对应插件，调 ``on_startup``，写状态。
+
+    **安全：双开关检查**
+    - RemotePlugin.enabled = 全局可用开关（第三方插件总开关）
+    - AccountFeature.enabled = 某账号启用开关
+    - 两者都 true 才能加载
+
+    Args:
+        db: AsyncSession
+        state: _AccountState 实例
+        af: AccountFeature 行
+        redis: Redis 客户端
+    """
     cls = get_plugin(af.feature_key)
     if cls is None:
         await _log(
@@ -383,6 +401,34 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         )
         await db.commit()
         return
+
+    # ── 安全：双开关检查 ──
+    # 第三方插件（source=installed）需要检查 RemotePlugin.enabled
+    plugin_source = getattr(cls, "_source", "builtin")
+    if plugin_source == "installed":
+        rp = (
+            await db.execute(
+                select(RemotePlugin).where(RemotePlugin.name == af.feature_key)
+            )
+        ).scalar_one_or_none()
+        if rp is None:
+            await _log(
+                redis,
+                state.account_id,
+                "warn",
+                f"feature {af.feature_key} 是 installed 插件但 remote_plugin 行不存在",
+            )
+            return
+        if not rp.enabled:
+            # RemotePlugin.enabled=False 时跳过加载（DB 状态已是 disabled）
+            await _log(
+                redis,
+                state.account_id,
+                "info",
+                f"feature {af.feature_key} 的 RemotePlugin.enabled=False，跳过加载",
+            )
+            return
+    # ── 双开关检查结束 ──
 
     # 拉规则（按 priority 倒序：值越大越先匹配）
     rules = (
@@ -447,10 +493,15 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
     state.contexts[af.feature_key] = ctx
 
     # 暴露插件命令到 TG 命令分发表
-    # 优先读实例属性（on_startup 可能动态设置），回退到类属性
+    # 安全：传入 generation 和 plugin_key，以便 reload/disable 时能追踪并注销旧命令
     cmds = getattr(inst, "commands", None) or cls.commands or {}
     for cname, fn in cmds.items():
-        register_plugin_command(cname, _wrap_cmd(fn, ctx))
+        register_plugin_command(
+            cname,
+            _wrap_cmd(fn, ctx),
+            owner_plugin_key=af.feature_key,
+            generation=state.generation,
+        )
 
     await db.execute(
         update(AccountFeature)
@@ -479,6 +530,59 @@ def _make_logger(redis: Any, account_id: int):
         await _log(redis, account_id, level, message, **detail)
 
     return _writer
+
+
+# ─────────────────────────────────────────────────────
+# 配置合并：_merge_plugin_config
+# ─────────────────────────────────────────────────────
+async def _merge_plugin_config(
+    db: "AsyncSessionLocal",
+    account_id: int,
+    feature_key: str,
+    account_config: dict[str, Any],
+) -> dict[str, Any]:
+    """合并插件配置。
+
+    合并顺序：schema defaults < global config < account config
+
+    - global config 存储在 Feature.manifest["global_config"] 中
+    - 合并时只取 account_config 中非 global 字段
+    """
+    from ...db.models.feature import Feature
+
+    # 获取 feature manifest
+    feature = await db.get(Feature, feature_key)
+    if feature is None:
+        return account_config
+
+    manifest = feature.manifest or {}
+    config_schema = manifest.get("config_schema", {})
+    global_config = manifest.get("global_config", {})
+
+    # 提取 schema defaults
+    defaults: dict[str, Any] = {}
+    properties = config_schema.get("properties", {})
+    for prop_name, prop_def in properties.items():
+        if isinstance(prop_def, dict) and "default" in prop_def:
+            defaults[prop_name] = prop_def["default"]
+
+    # 提取 global 字段名
+    global_fields = {
+        k for k, v in properties.items()
+        if isinstance(v, dict) and v.get("level") == "global"
+    }
+
+    # 提取 account 专属字段（排除 global 字段）
+    account_only_config = {k: v for k, v in account_config.items() if k not in global_fields}
+
+    # 合并：defaults < global < account_only
+    result = {**defaults}
+    for k, v in global_config.items():
+        if k in global_fields:
+            result[k] = v
+    result.update(account_only_config)
+
+    return result
 
 
 # ─────────────────────────────────────────────────────
@@ -526,11 +630,23 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
             ).scalar_one_or_none()
             if af is None or not af.enabled:
                 ctx = state.contexts.get(fkey)
-                if ctx is not None:
+                inst = state.instances.get(fkey)
+
+                # ── 安全：先注销该插件的所有命令 ──
+                if inst is not None:
+                    cls = get_plugin(fkey)
+                    if cls is not None:
+                        cmds = getattr(inst, "commands", None) or cls.commands or {}
+                        for cname in cmds.keys():
+                            unregister_plugin_command(cname, owner_plugin_key=fkey)
+
+                # 调用 shutdown（幂等设计）
+                if ctx is not None and inst is not None:
                     try:
                         await inst.on_shutdown(ctx)
                     except Exception:  # noqa: BLE001
                         log.exception("on_shutdown 失败 feature=%s", fkey)
+
                 state.instances.pop(fkey, None)
                 state.contexts.pop(fkey, None)
                 # 同时写状态为 disabled，便于前端展示
@@ -557,7 +673,9 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
                 )
             ).scalars().all()
             ctx = state.contexts[fkey]
-            ctx.config = dict(af.config or {})
+
+            # 合并配置：schema defaults < global config < account config
+            ctx.config = await _merge_plugin_config(db, account_id, fkey, dict(af.config or {}))
             ctx.rules = list(rules)
 
         # 2) 处理新增的 enabled feature
@@ -592,7 +710,16 @@ async def reload_plugin(account_id: int, plugin_key: str | None) -> None:
     state.generation += 1
     redis = state.redis or get_redis()
 
-    # 1) 先 shutdown 旧实例
+    # 1) 先注销旧插件命令（如果有）
+    if plugin_key in state.instances:
+        inst = state.instances[plugin_key]
+        cls = get_plugin(plugin_key)
+        if cls is not None:
+            cmds = getattr(inst, "commands", None) or cls.commands or {}
+            for cname in cmds.keys():
+                unregister_plugin_command(cname, owner_plugin_key=plugin_key)
+
+    # 2) shutdown 旧实例（幂等设计）
     if plugin_key in state.instances:
         try:
             await state.instances[plugin_key].on_shutdown(state.contexts[plugin_key])

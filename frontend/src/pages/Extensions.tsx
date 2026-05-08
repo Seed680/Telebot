@@ -55,6 +55,12 @@ import { ConfigDialog } from "@/components/plugin/ConfigDialog";
 import { getFeatureMatrix } from "@/api/features";
 import { toggleAccountFeature } from "@/api/accounts";
 import {
+  getPluginGlobalConfig,
+  setPluginGlobalConfig,
+  getEffectiveConfig,
+  updateAccountFeatureConfig,
+} from "@/api/features";
+import {
   listInstalledPackages,
   enableInstall,
   disableInstall,
@@ -69,6 +75,7 @@ import {
   uninstallRemotePlugin,
 } from "@/api/remotePlugin";
 import type { RemotePlugin } from "@/types/remotePlugin";
+import type { ConfigSchema } from "@/components/plugin/ConfigDialog";
 
 // ── 常量 ──────────────────────────────────────────────────────────
 type TabValue = "accounts" | "plugins" | "guide";
@@ -128,7 +135,13 @@ function AccountPluginsTab() {
   });
 
   const [selectedAid, setSelectedAid] = useState<number | null>(null);
-  const [configDialog, setConfigDialog] = useState<{ key: string; name: string; schema: Record<string, unknown> | null } | null>(null);
+  const [configDialog, setConfigDialog] = useState<{
+    key: string;
+    name: string;
+    schema: Record<string, unknown> | null;
+    globalConfig: Record<string, unknown>;
+    accountConfig: Record<string, unknown>;
+  } | null>(null);
 
   // 自动选第一个账号
   if (data && data.accounts.length > 0 && selectedAid === null) {
@@ -147,6 +160,29 @@ function AccountPluginsTab() {
 
   const selectedAccount = data?.accounts.find((a) => a.id === selectedAid);
   const features = data?.features ?? [];
+
+  // 获取 global config
+  const globalConfigQ = useQuery({
+    queryKey: ["plugin", "global", configDialog?.key ?? ""],
+    queryFn: () => getPluginGlobalConfig(configDialog!.key),
+    enabled: !!configDialog?.key,
+  });
+
+  // 获取 effective config
+  const effectiveConfigQ = useQuery({
+    queryKey: ["account", selectedAid ?? 0, "config", configDialog?.key ?? ""],
+    queryFn: () => getEffectiveConfig(selectedAid!, configDialog!.key),
+    enabled: !!selectedAid && !!configDialog?.key,
+  });
+
+  // 计算 account config = effective - global
+  const accountConfig = configDialog?.globalConfig
+    ? Object.fromEntries(
+        Object.entries(effectiveConfigQ.data ?? {}).filter(
+          ([k]) => !(k in configDialog.globalConfig)
+        )
+      )
+    : (effectiveConfigQ.data ?? {});
 
   return (
     <>
@@ -243,7 +279,27 @@ function AccountPluginsTab() {
                             size="sm"
                             variant="outline"
                             className="h-9 px-3"
-                            onClick={() => setConfigDialog({ key: f.key, name: f.display_name, schema: (f.config_schema as Record<string, unknown>) ?? null })}
+                            onClick={() => {
+                              getPluginGlobalConfig(f.key)
+                                .then((gc) => {
+                                  setConfigDialog({
+                                    key: f.key,
+                                    name: f.display_name,
+                                    schema: (f.config_schema as Record<string, unknown>) ?? null,
+                                    globalConfig: gc,
+                                    accountConfig: {},
+                                  });
+                                })
+                                .catch(() => {
+                                  setConfigDialog({
+                                    key: f.key,
+                                    name: f.display_name,
+                                    schema: (f.config_schema as Record<string, unknown>) ?? null,
+                                    globalConfig: {},
+                                    accountConfig: {},
+                                  });
+                                });
+                            }}
                           >
                             配置 →
                           </Button>
@@ -265,9 +321,42 @@ function AccountPluginsTab() {
       onOpenChange={(v) => !v && setConfigDialog(null)}
       pluginKey={configDialog?.key ?? ""}
       pluginName={configDialog?.name ?? ""}
-      schema={configDialog?.schema ?? null}
+      schema={(configDialog?.schema as unknown as ConfigSchema) ?? null}
       accountName={selectedAccount?.name}
-      onSave={async () => { toast.success("配置已保存（功能开发中）"); }}
+      accountId={selectedAid}
+      globalConfig={configDialog?.globalConfig ?? {}}
+      accountConfig={accountConfig}
+      onSave={async (globalVals, accountVals) => {
+        if (!configDialog || !selectedAid) return;
+
+        // 1. 保存 global config
+        const schema = configDialog.schema as unknown as ConfigSchema | null;
+        if (schema?.properties) {
+          const globalFields = Object.entries(schema.properties)
+            .filter(([, f]) => f.level === "global")
+            .map(([k]) => k);
+          const hasGlobalChanges = globalFields.some(
+            (k) => globalVals[k] !== configDialog.globalConfig[k]
+          );
+          if (hasGlobalChanges) {
+            const globalOnlyVals: Record<string, unknown> = {};
+            for (const k of globalFields) {
+              globalOnlyVals[k] = globalVals[k];
+            }
+            await setPluginGlobalConfig(configDialog.key, globalOnlyVals);
+          }
+        }
+
+        // 2. 保存 account config
+        if (Object.keys(accountVals).length > 0) {
+          await updateAccountFeatureConfig(selectedAid, configDialog.key, accountVals);
+        }
+
+        // 3. 刷新数据
+        qc.invalidateQueries({ queryKey: ["matrix"] });
+        qc.invalidateQueries({ queryKey: ["plugin", "global", configDialog.key] });
+        qc.invalidateQueries({ queryKey: ["account", selectedAid, "config", configDialog.key] });
+      }}
     />
     </>
   );

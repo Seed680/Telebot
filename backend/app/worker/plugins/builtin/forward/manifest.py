@@ -1,4 +1,10 @@
-"""forward 插件 manifest。"""
+"""forward 插件 manifest。
+
+Config Schema 说明：
+- level: "global" 的字段为全局配置，所有账号共享
+- 无 level 或 level: "account" 的字段为账号级配置
+- 配置合并顺序：schema defaults < global config < account config
+"""
 
 from __future__ import annotations
 
@@ -14,6 +20,9 @@ MANIFEST = Manifest(
     description="按规则把 incoming 消息转发到指定 chat（4 种 mode + 风控接入 + FloodWait 兜底）",
     permissions=["read_chat", "send_message", "send_file"],
     # rule.config 的 JSON Schema —— 前端可据此渲染表单 / 做兜底校验
+    # level 字段说明：
+    #   - "global": 全局配置，所有账号共享
+    #   - "account": 账号级配置，按账号隔离（默认）
     config_schema={
         "type": "object",
         "required": ["target_chat_id", "mode"],

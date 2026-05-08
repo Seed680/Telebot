@@ -1,4 +1,10 @@
-"""auto_reply 插件 manifest。"""
+"""auto_reply 插件 manifest。
+
+Config Schema 说明：
+- level: "global" 的字段为全局配置，所有账号共享
+- 无 level 或 level: "account" 的字段为账号级配置
+- 配置合并顺序：schema defaults < global config < account config
+"""
 
 from __future__ import annotations
 
@@ -13,6 +19,7 @@ MANIFEST = Manifest(
     author="builtin",
     description="按规则匹配关键词或正则后自动回复目标会话",
     permissions=["send_message", "edit_message", "read_chat"],
+    # 该插件目前无 config_schema，账号级配置通过 rules 表管理
 )
 
 __all__ = ["MANIFEST"]

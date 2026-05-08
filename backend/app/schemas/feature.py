@@ -34,6 +34,11 @@ class AccountFeatureToggle(BaseModel):
     config: dict[str, Any] | None = None
 
 
+class AccountFeatureConfigUpdate(BaseModel):
+    """仅更新账号级配置（不改变 enabled 状态）。"""
+    config: dict[str, Any]
+
+
 class AccountFeatureItem(BaseModel):
     feature_key: str
     enabled: bool
@@ -58,3 +63,27 @@ class FeatureMatrixRow(BaseModel):
 class FeatureMatrixResponse(BaseModel):
     features: list[FeatureInfo]
     accounts: list[FeatureMatrixRow]
+
+
+class PluginGlobalConfigResponse(BaseModel):
+    """global config 响应。"""
+    plugin_key: str
+    config: dict[str, Any]  # 合并后的最终配置
+    global_config: dict[str, Any] | None = None  # 仅 global 字段
+
+
+class PluginGlobalConfigUpdate(BaseModel):
+    """更新 global config 的请求体。"""
+    config: dict[str, Any]
+
+
+class ConfigValidationError(BaseModel):
+    """JSON Schema 验证错误。"""
+    field: str
+    message: str
+
+
+class ConfigValidationResponse(BaseModel):
+    """JSON Schema 验证结果。"""
+    valid: bool
+    errors: list[ConfigValidationError] = []

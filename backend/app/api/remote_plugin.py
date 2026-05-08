@@ -12,6 +12,7 @@ from ..services.remote_plugin_service import (
     DuplicatePluginName,
     GitOperationFailed,
     InvalidPluginMetadata,
+    InvalidSourceUrl,
     RemotePluginError,
     RemotePluginNotFound,
 )
@@ -44,6 +45,8 @@ async def api_install_plugin(
         return row
     except DuplicatePluginName as e:
         raise HTTPException(409, detail={"code": e.code, "message": e.message}) from e
+    except InvalidSourceUrl as e:
+        raise HTTPException(400, detail={"code": e.code, "message": e.message}) from e
     except (GitOperationFailed, InvalidPluginMetadata) as e:
         raise HTTPException(400, detail={"code": e.code, "message": e.message}) from e
     except RemotePluginError as e:

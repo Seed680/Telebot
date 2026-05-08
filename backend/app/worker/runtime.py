@@ -162,6 +162,28 @@ async def run_worker(account_id: int) -> None:
             redis, account_id, "error", f"worker 异常退出: {type(e).__name__}: {e}"
         )
     finally:
+        # ── 安全：调用所有已加载插件的 on_shutdown（幂等设计）──
+        try:
+            from .plugins.loader import _STATES  # 延迟 import 避免循环
+
+            state = _STATES.get(account_id)
+            if state is not None:
+                for fkey, inst in list(state.instances.items()):
+                    ctx = state.contexts.get(fkey)
+                    if ctx is not None and inst is not None:
+                        try:
+                            await inst.on_shutdown(ctx)
+                            log.info("插件 %s on_shutdown 完成", fkey)
+                        except Exception:  # noqa: BLE001
+                            # on_shutdown 失败不阻止 worker 退出，只记日志
+                            log.exception("插件 %s on_shutdown 失败", fkey)
+        except ImportError:
+            # 插件系统未就绪
+            pass
+        except Exception:  # noqa: BLE001
+            log.exception("worker shutdown 时插件清理失败 account_id=%s", account_id)
+
+        # ── 断开 client ──
         try:
             if client.is_connected():
                 await client.disconnect()
@@ -192,6 +214,23 @@ async def _listen_cmd(redis, client, account_id: int, paused: asyncio.Event) -> 
                 await _log(redis, account_id, "info", "已恢复")
             elif cmd.type == CMD_STOP:
                 await _log(redis, account_id, "info", "收到 stop 指令")
+                # ── 安全：先调用插件 on_shutdown，再断开 client ──
+                try:
+                    from .plugins.loader import _STATES  # 延迟 import 避免循环
+
+                    state = _STATES.get(account_id)
+                    if state is not None:
+                        for fkey, inst in list(state.instances.items()):
+                            ctx = state.contexts.get(fkey)
+                            if ctx is not None and inst is not None:
+                                try:
+                                    await inst.on_shutdown(ctx)
+                                except Exception:  # noqa: BLE001
+                                    log.exception("插件 %s on_shutdown 失败", fkey)
+                except ImportError:
+                    pass
+                except Exception:  # noqa: BLE001
+                    log.exception("stop 时插件清理失败")
                 await client.disconnect()
                 return
             elif cmd.type == CMD_PING:

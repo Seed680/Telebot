@@ -31,9 +31,18 @@ from ..db.models.command import (
     LLMProvider,
     default_api_format_for,
 )
+from .llm_dto import LLMProviderDTO
 
 # 默认调用超时；prompt 较长 / TG 端用户体验角度都不宜过长
 _HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
+# ── Retry 策略常量 ──────────────────────────────────────────
+# 最大重试次数（不含首次调用）
+_MAX_RETRIES = 3
+# 重试睡票基数（秒），指数退避
+_RETRY_BASE_DELAY = 1.0
+# 最大退避时间（秒）
+_RETRY_MAX_DELAY = 30.0
 
 
 @dataclass
@@ -547,13 +556,110 @@ class ResponsesClient(LLMClient):
 class LLMError(Exception):
     """LLM 调用层统一异常；message 已脱敏。"""
 
+    def __init__(self, message: str, *, retryable: bool = False, fallback: bool = False):
+        super().__init__(message)
+        self.retryable = retryable  # 是否可重试（timeout/429/5xx/网络错误）
+        self.fallback = fallback     # 是否可 fallback（网络错误/非认证错误）
+
+
+class LLMCallFailed(Exception):
+    """LLM 调用失败（捕获后用于 fallback 决策）。"""
+
+    def __init__(
+        self,
+        message: str,
+        provider_id: int | None = None,
+        provider_name: str | None = None,
+        error_type: str | None = None,
+        status_code: int | None = None,
+        retryable: bool = False,
+    ):
+        super().__init__(message)
+        self.provider_id = provider_id
+        self.provider_name = provider_name
+        self.error_type = error_type  # "timeout" / "network" / "rate_limit" / "auth" / "server_error"
+        self.status_code = status_code
+        self.retryable = retryable
+
+
+def _is_retryable_error(exc: Exception, status_code: int | None = None) -> bool:
+    """判断错误是否可重试。
+
+    可重试：timeout / ConnectError / 网络错误 / 429 / 5xx
+    不可重试：400 / 401 / 403 / 404（认证/配置错误，重试无意义）
+    """
+    if status_code is not None:
+        # 4xx 客户端错误中，只有 429 限流可重试
+        if status_code == 429:
+            return True
+        # 5xx 服务端错误可重试
+        if 500 <= status_code < 600:
+            return True
+        # 400/401/403/404 等不可重试
+        return False
+
+    # 无 status_code 时，判断异常类型
+    exc_name = type(exc).__name__
+    retryable_types = {
+        "TimeoutException",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "WriteTimeout",
+        "PoolTimeout",
+        "ConnectError",
+        "ReadError",
+        "WriteError",
+        "ProxyError",
+        "SSLError",
+        "ProtocolError",
+        "HTTPError",  # httpx 基础异常，包含各种网络问题
+    }
+    return exc_name in retryable_types
+
+
+def _classify_error(exc: Exception, status_code: int | None = None) -> str:
+    """分类错误类型（用于日志和用户提示）。"""
+    if status_code is not None:
+        if status_code == 429:
+            return "rate_limit"
+        if status_code == 401 or status_code == 403:
+            return "auth"
+        if status_code == 404:
+            return "not_found"
+        if 500 <= status_code < 600:
+            return "server_error"
+        if 400 <= status_code < 500:
+            return "client_error"
+        return "unknown"
+
+    exc_name = type(exc).__name__
+    if "Timeout" in exc_name:
+        return "timeout"
+    if "Connect" in exc_name or "Proxy" in exc_name or "SSL" in exc_name:
+        return "network"
+    if "HTTP" in exc_name:
+        return "network"
+    return "unknown"
+
+
+def _compute_retry_delay(attempt: int, base: float = _RETRY_BASE_DELAY, max_delay: float = _RETRY_MAX_DELAY) -> float:
+    """计算指数退避延迟：base * 2^(attempt-1)，加抖动后限制在 max_delay 内。"""
+    import random
+    delay = base * (2 ** (attempt - 1))
+    # 加 ±25% 抖动
+    jitter = delay * 0.25 * (2 * random.random() - 1)
+    return min(delay + jitter, max_delay)
+
 
 def _safe_error_message(msg: str, api_key: str | None) -> str:
     """把可能含敏感信息的错误文本脱敏。
 
     - 若 api_key 出现在 msg 中，整段替换为 ``<redacted>``
     - 兜底过滤 ``sk-...`` / ``Bearer ...`` 形态
+    - 过滤其他常见 token 格式
     """
+    import re
+
     if not msg:
         return ""
     out = msg
@@ -562,6 +668,13 @@ def _safe_error_message(msg: str, api_key: str | None) -> str:
     # 统一截断，避免长串敏感数据透出
     if len(out) > 400:
         out = out[:400] + "..."
+    # 正则过滤常见 token 格式（独立于 api_key 变量）
+    # sk- 开头的 key
+    out = re.sub(r"sk-[A-Za-z0-9_-]{8,}", "<sk>", out)
+    # Bearer token
+    out = re.sub(r"Bearer\s+[A-Za-z0-9_.\-]{8,}", "Bearer <token>", out)
+    # 常见的其他 key 格式
+    out = re.sub(r"(?i)(api[_-]?key|secret|token)\s*[=:]\s*['\"]?[A-Za-z0-9_.\-]{8,}['\"]?", r"\1=<redacted>", out)
     return out
 
 
@@ -674,12 +787,63 @@ def build_client(
     raise ValueError(f"未知 api_format: {fmt}")
 
 
+def build_client_from_dto(
+    dto: LLMProviderDTO,
+    override_model: str | None = None,
+    proxy_url: str | None = None,
+) -> LLMClient:
+    """根据 LLMProviderDTO 装配具体 LLMClient。
+
+    与 build_client 等效，但输入是 DTO 而非 ORM 行。
+    proxy_url 以参数传入优先，其次用 dto.proxy_url。
+
+    Args:
+        dto: LLMProviderDTO 对象
+        override_model: 覆盖模型名（优先于 dto.default_model）
+        proxy_url: 代理 URL（优先于 dto.proxy_url）
+    """
+    api_key = ""
+    if dto.api_key_enc:
+        api_key = decrypt_str(dto.api_key_enc)
+    model = (override_model or dto.default_model or "").strip()
+    if not model:
+        raise ValueError("LLM provider 没配 default_model，且当次调用也未提供 model 覆盖")
+
+    # api_format 优先；兜底按 provider 厂商
+    fmt = dto.api_format or default_api_format_for(dto.provider)
+
+    # proxy 合并：参数传入 > dto 内置
+    final_proxy = proxy_url if proxy_url else dto.proxy_url
+
+    if fmt == LLM_API_FORMAT_CHAT_COMPLETIONS:
+        base = dto.base_url
+        if not base and dto.is_ollama:
+            base = "http://localhost:11434/v1"
+        return OpenAIClient(
+            api_key="" if dto.is_ollama else api_key,
+            base_url=base,
+            model=model,
+            proxy_url=final_proxy,
+        )
+    if fmt == LLM_API_FORMAT_RESPONSES:
+        return ResponsesClient(
+            api_key=api_key, base_url=dto.base_url, model=model, proxy_url=final_proxy
+        )
+    if fmt == LLM_API_FORMAT_ANTHROPIC_MESSAGES:
+        return AnthropicClient(
+            api_key=api_key, base_url=dto.base_url, model=model, proxy_url=final_proxy
+        )
+    raise ValueError(f"未知 api_format: {fmt}")
+
+
 __all__ = [
     "AnthropicClient",
+    "LLMCallFailed",
     "LLMClient",
     "LLMError",
     "LLMResult",
     "OpenAIClient",
     "ResponsesClient",
     "build_client",
+    "build_client_from_dto",
 ]

@@ -103,3 +103,47 @@ def test_parse_dt_accepts_z_suffix() -> None:
     dt = _parse_dt("2026-05-10T10:11:12Z")
     assert dt is not None
     assert dt.tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_scheduler_floodwait_calls_engine_correctly() -> None:
+    """scheduler FloodWaitError 时正确调用 engine.on_flood_wait（不带 peer_id）。"""
+    from unittest.mock import AsyncMock
+    from app.worker.plugins.builtin.scheduler.plugin import SchedulerPlugin
+
+    plugin = SchedulerPlugin()
+
+    # Mock engine
+    mock_engine = AsyncMock()
+    mock_engine.on_flood_wait = AsyncMock()
+    mock_engine.acquire = AsyncMock()
+    mock_engine.acquire.return_value = AsyncMock()
+    mock_engine.acquire.return_value.allowed = True
+    mock_engine.acquire.return_value.wait_seconds = 0
+
+    # Mock client
+    mock_client = AsyncMock()
+
+    class FakeFloodWaitError(Exception):
+        seconds = 10
+
+    mock_client.send_message = AsyncMock(side_effect=FakeFloodWaitError())
+
+    class MockCtx:
+        account_id = 1
+        engine = mock_engine
+        client = mock_client
+        log = AsyncMock()
+
+    ctx = MockCtx()
+
+    # 触发 FloodWaitError
+    await plugin._send_with_ratelimit(ctx, 123, "test message")
+
+    # 验证 on_flood_wait 被调用（不带 peer_id）
+    mock_engine.on_flood_wait.assert_called_once()
+    args = mock_engine.on_flood_wait.call_args
+    # 确认只传了 2 个参数（action 和 exc）
+    assert len(args[0]) == 2
+    assert args[0][0] == "send_message_group"
+    assert isinstance(args[0][1], FakeFloodWaitError)

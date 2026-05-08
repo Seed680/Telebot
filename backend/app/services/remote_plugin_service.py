@@ -1,11 +1,16 @@
 """远程 Git 仓库插件管理服务（阶段 D：tpm-style 远程插件）。
 
 职责：
-- ``install``：``git clone`` 到 ``plugins/installed/<name>/`` → 解析 ``plugin.json`` 或
-  ``manifest.py`` → 写 ``remote_plugin`` 表 → 触发 worker 热加载（``reload_plugin``）
+- ``install``：``git clone`` 到 ``plugins/installed/<name>/`` → 解析 ``plugin.json`` → 写 ``remote_plugin`` 表 → 触发 worker 热加载（``reload_plugin``）
 - ``uninstall``：删 DB 行 + 删插件目录
 - ``enable`` / ``disable``：翻转 ``enabled`` 标志，并向 worker 广播热加载
-- ``update``：``git pull`` → 重读 manifest → 写新版本号 → 触发热加载
+- ``update``：``git pull`` → 重读 plugin.json → 写新版本号 → 触发热加载
+
+安全设计（阶段 E 修复）：
+- 安装阶段**绝对禁止执行任何 Python 代码**（manifest.py 在安装时不被解析/执行）
+- 只允许静态解析 ``plugin.json``
+- source_url 只允许 https:// 和 git+ssh://
+- git clone 强制 timeout
 
 设计要点：
 - 与现有 ``loader.py`` 集成靠两条路：
@@ -19,15 +24,15 @@
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import json
 import logging
 import re
 import shutil
-import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +46,12 @@ from ..worker.ipc import CMD_RELOAD_PLUGIN, cmd_channel, make_cmd
 from ..worker.plugins.loader import reload_plugin
 
 log = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────
+# 安全常量：source_url 允许的 scheme
+# ─────────────────────────────────────────────────────
+_ALLOWED_URL_SCHEMES: frozenset[str] = frozenset({"https", "git+ssh"})
 
 
 # ─────────────────────────────────────────────────────
@@ -68,21 +79,82 @@ class GitOperationFailed(RemotePluginError):
 
 
 class InvalidPluginMetadata(RemotePluginError):
-    """``plugin.json`` / ``manifest.py`` 缺失或解析失败。"""
+    """``plugin.json`` 缺失或解析失败。"""
+
+
+class InvalidSourceUrl(RemotePluginError):
+    """source_url 不符合安全要求。"""
 
 
 # ─────────────────────────────────────────────────────
-# 元数据容器
+# 元数据模型（用于校验 plugin.json）
 # ─────────────────────────────────────────────────────
+class PluginMetadataSchema(BaseModel):
+    """plugin.json 的 Pydantic 校验模型。
+
+    只允许静态解析，不执行任何 Python 代码。
+    所有字段在通过校验后才返回 PluginMetadata。
+    """
+
+    # 允许 name/key 任一字段，优先用 name
+    name: str | None = None
+    key: str | None = None
+
+    display_name: str = ""
+    description: str = ""
+    author: str = ""
+    version: str = "0.0.0"
+    # entry 是可选的，默认为 plugin.py
+    entry: str = "plugin.py"
+    # permissions 和 config_schema 是可选扩展字段
+    permissions: list[str] = []
+    config_schema: dict[str, Any] | None = None
+
+    @field_validator("name", "key")
+    @classmethod
+    def _validate_key(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = str(v).strip()
+        if not v:
+            return None
+        # 路径穿越防御：禁止 . / \ 以及不可见字符
+        if not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$", v):
+            raise ValueError(
+                f"插件名仅允许字母/数字/_/-，得到 {v!r}"
+            )
+        return v
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, v: str) -> str:
+        # 简单校验：必须是类似 x.y.z 的格式
+        v = str(v).strip()
+        if not re.match(r"^\d+\.\d+\.\d+", v):
+            raise ValueError(f"版本号格式不正确: {v!r}")
+        return v
+
+    @field_validator("author")
+    @classmethod
+    def _validate_author(cls, v: str) -> str:
+        # 防止注入
+        v = str(v).strip()
+        if len(v) > 255:
+            raise ValueError("author 字段过长（最大 255 字符）")
+        return v
+
+
 @dataclass
 class PluginMetadata:
-    """从 ``plugin.json`` 或 ``manifest.py`` 解析出来的统一形态。"""
+    """从 ``plugin.json`` 解析出来的统一形态。"""
 
     name: str
     display_name: str = ""
     description: str = ""
     author: str = ""
     version: str = "0.0.0"
+    entry: str = "plugin.py"
+    permissions: list[str] = []
 
 
 # ─────────────────────────────────────────────────────
@@ -114,6 +186,55 @@ def _plugin_dir(name: str) -> Path:
     return target
 
 
+def _validate_source_url(url: str) -> None:
+    """校验 source_url 只允许 https:// 或 git+ssh://，防止本地文件/恶意 URL 攻击。
+
+    Args:
+        url: 待校验的 source_url
+
+    Raises:
+        InvalidSourceUrl: scheme 不在白名单中
+    """
+    if not url or not url.strip():
+        raise InvalidSourceUrl("BAD_SOURCE_URL", "source_url 不能为空")
+
+    url = url.strip()
+
+    # 处理 git+ssh:// 格式（去掉 git+ 前缀取真实 scheme）
+    check_url = url
+    if check_url.startswith("git+ssh://"):
+        check_url = "ssh://" + check_url[9:]
+
+    # 解析 scheme
+    if "://" in check_url:
+        scheme = check_url.split("://", 1)[0].lower()
+    elif ":" in check_url and "@" in check_url:
+        # scp-like 格式 git@github.com:foo/bar
+        scheme = "ssh"
+    else:
+        raise InvalidSourceUrl(
+            "BAD_SOURCE_URL",
+            f"source_url 缺少合法 scheme: {url!r}",
+        )
+
+    # 特殊处理 scp-like SSH URL
+    if scheme == "ssh" and url.startswith("git@"):
+        # git@github.com:foo/bar.git 格式是允许的
+        allowed_ssh_pattern = re.compile(r"^git@[a-zA-Z0-9.\-]+:[^:]+$")
+        if not allowed_ssh_pattern.match(url):
+            raise InvalidSourceUrl(
+                "BAD_SOURCE_URL",
+                f"SSH URL 格式不正确: {url!r}",
+            )
+        return
+
+    if scheme not in _ALLOWED_URL_SCHEMES:
+        raise InvalidSourceUrl(
+            "BAD_SOURCE_URL",
+            f"source_url 只允许 https:// 或 git+ssh:// scheme，得到 {scheme!r}",
+        )
+
+
 def _derive_name_from_url(url: str) -> str:
     """从 ``source_url`` 的最后一段推导插件名：
     - ``https://github.com/foo/bar.git`` → ``bar``
@@ -132,8 +253,12 @@ def _derive_name_from_url(url: str) -> str:
     return last
 
 
-async def _run_git(*args: str, cwd: str | Path | None = None) -> str:
-    """以子进程跑 ``git <args>``；失败抛 ``GitOperationFailed``。返回 stdout（已解码）。"""
+async def _run_git(*args: str, cwd: str | Path | None = None, timeout: float = 120.0) -> str:
+    """以子进程跑 ``git <args>``；失败抛 ``GitOperationFailed``。返回 stdout（已解码）。
+
+    Args:
+        timeout: git 操作超时秒数，默认 120s。clone 超时会导致半目录被清理。
+    """
     proc = await asyncio.create_subprocess_exec(
         "git",
         *args,
@@ -141,7 +266,17 @@ async def _run_git(*args: str, cwd: str | Path | None = None) -> str:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise GitOperationFailed(
+            "GIT_TIMEOUT",
+            f"git {' '.join(args)} 超时（{timeout}s）",
+        )
     if proc.returncode != 0:
         msg = (stderr or b"").decode("utf-8", errors="replace").strip()
         raise GitOperationFailed(
@@ -152,78 +287,75 @@ async def _run_git(*args: str, cwd: str | Path | None = None) -> str:
 
 
 # ─────────────────────────────────────────────────────
-# 元数据读取：plugin.json 优先，回退 manifest.py
+# 元数据读取：只支持 plugin.json，禁止执行 manifest.py
 # ─────────────────────────────────────────────────────
 def _read_plugin_metadata(plugin_dir: Path, *, fallback_name: str) -> PluginMetadata:
-    """从插件目录读元数据。先尝试 ``plugin.json``，再回退 ``manifest.py``。
+    """从插件目录读元数据。**安全设计：只解析 plugin.json，绝对不执行 manifest.py**。
 
-    ``plugin.json`` 字段约定（与 manifest.Manifest 字段名保持一致）：
+    plugin.json 字段约定：
         {
-          "name" / "key": str,
+          "name" / "key": str (必填其一，name 优先),
           "display_name": str,
           "description": str,
           "author": str,
-          "version": str
+          "version": str,
+          "entry": str (可选，默认 plugin.py),
+          "permissions": list[str] (可选),
+          "config_schema": dict (可选)
         }
 
-    ``manifest.py`` 必须导出顶层 ``MANIFEST: Manifest``（与 zip 安装路径一致），
-    本函数只读取，不会 import 进 ``app.*`` 命名空间。
+    Args:
+        plugin_dir: 插件目录路径
+        fallback_name: plugin.json 解析失败时的回退名称
+
+    Returns:
+        PluginMetadata 实例
+
+    Raises:
+        InvalidPluginMetadata: plugin.json 不存在或解析失败
     """
-    # ── 1) plugin.json ──
+    # ── 只允许 plugin.json ──
     pj = plugin_dir / "plugin.json"
-    if pj.is_file():
-        try:
-            data = json.loads(pj.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise InvalidPluginMetadata(
-                "BAD_PLUGIN_JSON", f"plugin.json 解析失败: {exc}"
-            ) from exc
-        return PluginMetadata(
-            name=str(data.get("name") or data.get("key") or fallback_name),
-            display_name=str(data.get("display_name") or ""),
-            description=str(data.get("description") or ""),
-            author=str(data.get("author") or ""),
-            version=str(data.get("version") or "0.0.0"),
+    if not pj.is_file():
+        raise InvalidPluginMetadata(
+            "PLUGIN_JSON_NOT_FOUND",
+            f"插件目录 {plugin_dir} 必须包含 plugin.json（manifest.py 在安装阶段禁止执行）",
         )
 
-    # ── 2) manifest.py ──
-    mp = plugin_dir / "manifest.py"
-    if mp.is_file():
-        spec_name = f"_telebot_remote_manifest_{plugin_dir.name}_{id(mp)}"
-        spec = importlib.util.spec_from_file_location(spec_name, mp)
-        if spec is None or spec.loader is None:
-            raise InvalidPluginMetadata(
-                "MANIFEST_LOAD_FAIL", f"无法构造 manifest.py 的 spec: {mp}"
-            )
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[spec_name] = mod
-        try:
-            try:
-                spec.loader.exec_module(mod)
-            except Exception as exc:  # noqa: BLE001
-                raise InvalidPluginMetadata(
-                    "MANIFEST_EXEC_FAIL", f"manifest.py 执行失败: {exc}"
-                ) from exc
-        finally:
-            sys.modules.pop(spec_name, None)
-        manifest = getattr(mod, "MANIFEST", None)
-        if manifest is None:
-            raise InvalidPluginMetadata(
-                "MANIFEST_MISSING_CONST",
-                "manifest.py 必须导出顶层常量 MANIFEST",
-            )
-        # 兼容 Manifest dataclass / 普通 object：通过 getattr 取字段
-        return PluginMetadata(
-            name=str(getattr(manifest, "key", fallback_name) or fallback_name),
-            display_name=str(getattr(manifest, "display_name", "") or ""),
-            description=str(getattr(manifest, "description", "") or ""),
-            author=str(getattr(manifest, "author", "") or ""),
-            version=str(getattr(manifest, "version", "0.0.0") or "0.0.0"),
+    try:
+        raw_data = json.loads(pj.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise InvalidPluginMetadata(
+            "BAD_PLUGIN_JSON", f"plugin.json 解析失败: {exc}"
+        ) from exc
+
+    # Pydantic 校验
+    try:
+        validated = PluginMetadataSchema(**raw_data)
+    except Exception as exc:
+        raise InvalidPluginMetadata(
+            "BAD_PLUGIN_JSON",
+            f"plugin.json 字段校验失败: {exc}",
+        ) from exc
+
+    # 提取 name（优先 name，key 作备选）
+    name = validated.name or validated.key or fallback_name
+
+    # 再次路径穿越防御（防御 plugin.json 中可能的恶意 name）
+    if not _NAME_RE.match(name):
+        raise InvalidPluginMetadata(
+            "BAD_PLUGIN_NAME",
+            f"plugin.json 中的 name/key 非法: {name!r}",
         )
 
-    raise InvalidPluginMetadata(
-        "MANIFEST_NOT_FOUND",
-        f"插件目录 {plugin_dir} 缺少 plugin.json 或 manifest.py",
+    return PluginMetadata(
+        name=name,
+        display_name=str(validated.display_name or ""),
+        description=str(validated.description or ""),
+        author=str(validated.author or ""),
+        version=str(validated.version or "0.0.0"),
+        entry=str(validated.entry or "plugin.py"),
+        permissions=list(validated.permissions or []),
     )
 
 
@@ -284,25 +416,31 @@ async def install(
 ) -> RemotePlugin:
     """从 Git 仓库克隆并安装一个远程插件。
 
+    **安全要求**：
+    - source_url 必须通过 ``_validate_source_url``（只允许 https:// 或 git+ssh://）
+    - 安装阶段绝对不执行任何 Python 代码（只解析 plugin.json）
+
     步骤：
       1. 推导 / 校验 ``name``
-      2. 拒绝重名：DB 已有同名行或目录已存在 → ``DuplicatePluginName``
-      3. ``git clone <source_url> plugins/installed/<name>``
-      4. 读 ``plugin.json`` / ``manifest.py``
-      5. 写 ``remote_plugin`` 行
-      6. 注册到 ``feature`` 表（is_builtin=False），使功能矩阵可见
-      7. 若 ``default_enabled=True``，为所有已有账号创建 ``AccountFeature`` 行
-      8. 触发 ``reload_plugin`` 广播
+      2. 校验 ``source_url`` scheme
+      3. 拒绝重名：DB 已有同名行或目录已存在 → ``DuplicatePluginName``
+      4. ``git clone <source_url> plugins/installed/<name>`` (带 timeout)
+      5. 读 ``plugin.json``（不执行 manifest.py）
+      6. 写 ``remote_plugin`` 行
+      7. 注册到 ``feature`` 表（is_builtin=False），使功能矩阵可见
+      8. 若 ``default_enabled=True``，为所有已有账号创建 ``AccountFeature`` 行
+      9. 触发 ``reload_plugin`` 广播
 
     任何中间步骤失败：已克隆的目录会被清理；DB 不会留下脏行（由调用方
     在事务里 commit / rollback 即可，本函数只 ``flush``）。
     """
-    if not source_url or not source_url.strip():
-        raise RemotePluginError("BAD_SOURCE_URL", "source_url 不能为空")
+    # 1. 安全校验 source_url
+    _validate_source_url(source_url)
+
     final_name = name or _derive_name_from_url(source_url)
     target = _plugin_dir(final_name)
 
-    # 重名拦截：先查 DB，再查目录
+    # 2. 重名拦截：先查 DB，再查目录
     existing = (
         await db.execute(select(RemotePlugin).where(RemotePlugin.name == final_name))
     ).scalar_one_or_none()
@@ -315,12 +453,12 @@ async def install(
             "DIR_EXISTS", f"目录已存在但 DB 无记录: {target}（请先手动清理）"
         )
 
-    # 确保父目录存在
+    # 3. 确保父目录存在
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    # git clone
+    # 4. git clone（带 timeout，防止挂起）
     try:
-        await _run_git("clone", "--depth", "1", source_url, str(target))
+        await _run_git("clone", "--depth", "1", source_url, str(target), timeout=180.0)
     except GitOperationFailed:
         # 失败时清理可能产生的部分目录
         if target.exists():
@@ -463,7 +601,10 @@ async def disable(db: AsyncSession, name: str) -> RemotePlugin:
 
 
 async def update(db: AsyncSession, name: str) -> RemotePlugin:
-    """从远程仓库拉取最新版本（``git pull``）+ 重读 manifest + 写新版本号。"""
+    """从远程仓库拉取最新版本（``git pull``）+ 重读 plugin.json + 写新版本号。
+
+    注意：manifest.py 不会被执行，只解析 plugin.json。
+    """
     row = (
         await db.execute(select(RemotePlugin).where(RemotePlugin.name == name))
     ).scalar_one_or_none()
@@ -477,8 +618,8 @@ async def update(db: AsyncSession, name: str) -> RemotePlugin:
             f"插件目录已丢失: {target}（请先 uninstall 再 install）",
         )
 
-    # git pull —— 保持简单，直接 pull 当前分支；若仓库无 upstream 会抛错
-    await _run_git("pull", "--ff-only", cwd=target)
+    # git pull（带 timeout）
+    await _run_git("pull", "--ff-only", cwd=target, timeout=60.0)
 
     meta = _read_plugin_metadata(target, fallback_name=name)
     if meta.display_name:
@@ -511,7 +652,9 @@ __all__ = [
     "DuplicatePluginName",
     "GitOperationFailed",
     "InvalidPluginMetadata",
+    "InvalidSourceUrl",
     "PluginMetadata",
+    "PluginMetadataSchema",
     "RemotePluginError",
     "RemotePluginNotFound",
     "disable",

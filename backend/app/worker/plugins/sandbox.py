@@ -1,7 +1,14 @@
-"""插件运行时沙箱（阶段 C）。
+"""插件运行时沙箱（阶段 C，阶段 E 安全加固）。
 
 目标：限制第三方插件 (``installed`` source) 能调用的 Telethon API 范围；
 内置 builtin 插件直接拿到原 ``TelegramClient``，不走沙箱。
+
+安全设计（阶段 E 修复）：
+- 移除 ``_ALWAYS_ALLOWED`` 中的 ``session``，防止第三方插件访问真实 session
+- 禁止通过 ``__class__`` 反射获取真实对象
+- 禁止通过 ``__getattr__`` 访问私有属性（以 _ 开头）
+- 禁止通过 ``__dict__`` 绕过权限检查
+- 禁止通过 ``__globals__`` / ``__code__`` 等获取运行时信息
 
 设计：
 - ``ALLOWED_API`` 把 manifest 中声明的"能力名" (e.g. ``send_message``) 映射到一组
@@ -19,12 +26,10 @@
 - ``delete_message``  : ``delete_messages``
 
 约束：
-- 仅拦截顶层 ``getattr``；插件取到方法后多次调用都不再过 check（性能）
+- 仅拦截顶层 ``getattr``；插件取到方法后多次调用都不再过 check（性能权衡）
 - 私有属性（`_` 前缀）默认拒绝，避免拿到真实 client 内部对象绕过白名单
 - 调用方 (loader) 在 ``installed`` 源 plugin 启动时把 ``ctx.client`` 替成
   ``SandboxClient(real, perms)``；``builtin`` 不变
-
-注意：拦截 ``__call__``（raw MTProto）与 ``__class__``，避免通过反射或原始调用绕过权限检查。
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ ALLOWED_API: dict[str, frozenset[str]] = {
 
 
 # 默认放行集合：连接 / 关闭 / 自身查询等，不属于业务 API，避免插件起步崩
+# 注意：阶段 E 移除了 "session"，防止第三方插件访问真实 session 对象
 _ALWAYS_ALLOWED: frozenset[str] = frozenset(
     {
         "connect",
@@ -54,11 +60,43 @@ _ALWAYS_ALLOWED: frozenset[str] = frozenset(
         "is_connected",
         "is_user_authorized",
         "loop",
-        "session",
         "get_me",
         # Telethon Helper 上下文管理器
         "__aenter__",
         "__aexit__",
+    }
+)
+
+# 危险属性黑名单：这些属性绝对禁止第三方插件访问
+_BLOCKED_ATTRS: frozenset[str] = frozenset(
+    {
+        # 敏感对象
+        "session",
+        "session_name",
+        # 反射相关
+        "__class__",
+        "__dict__",
+        "__getattribute__",
+        "__getattr__",  # 已覆盖但显式列禁止
+        "__setattr__",
+        "__globals__",
+        "__code__",
+        "__closure__",
+        "__func__",
+        "__module__",
+        "__builtins__",
+        "__subclasshook__",
+        "__mro__",
+        # 私有属性变体（插件可能尝试 _xxx 或 __xxx）
+        "_client",
+        "_api",
+        "_sender",
+        "_state",
+        "_connection",
+        "_dcs",
+        "api",
+        "sender",
+        "state",
     }
 )
 
@@ -81,8 +119,11 @@ def resolve_permissions(perms: list[str] | None) -> frozenset[str]:
 class SandboxClient:
     """``TelegramClient`` 的最小化代理：只放行 manifest 声明的方法。
 
-    ``__getattr__`` 是唯一拦截点：插件每次取属性都会过 check，
-    取到的对象（method）后续怎么用我们就不管了——这是性能权衡。
+    **安全设计**：
+    - 禁止访问 ``session`` 等敏感属性
+    - 禁止通过 ``__class__`` / ``__dict__`` 等反射获取真实对象
+    - 禁止访问私有属性（以 _ 开头）
+    - 每次 ``__getattr__`` 调用都会经过权限检查
     """
 
     __slots__ = ("_real", "_allowed", "_plugin_key", "_perms")
@@ -102,8 +143,17 @@ class SandboxClient:
 
     @property
     def __class__(self):  # type: ignore[override]
-        """阻断通过 __class__ 反射真实对象能力。"""
-        raise PermissionError(f"插件 {self._plugin_key!r} 禁止访问 client.__class__")
+        """阻断通过 __class__ 反射获取真实对象类型。"""
+        raise PermissionError(
+            f"插件 {self._plugin_key!r} 禁止访问 client.__class__"
+        )
+
+    @property
+    def __dict__(self) -> dict:  # type: ignore[override]
+        """阻断通过 __dict__ 反射获取真实对象属性。"""
+        raise PermissionError(
+            f"插件 {self._plugin_key!r} 禁止访问 client.__dict__"
+        )
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """阻断 raw MTProto 路径：client(functions.xxx(...))."""
@@ -111,15 +161,38 @@ class SandboxClient:
             f"插件 {self._plugin_key!r} 禁止调用 client.__call__ (raw MTProto)"
         )
 
+    def __getattribute__(self, name: str) -> Any:
+        """元属性访问（__slots__ 字段走此路径）。"""
+        # 危险属性直接拒绝
+        if name in _BLOCKED_ATTRS or name.startswith("_"):
+            raise PermissionError(
+                f"插件 {self._plugin_key!r} 禁止访问 client.{name}"
+            )
+        return super().__getattribute__(name)
+
     def __getattr__(self, name: str) -> Any:
-        # __slots__ 上的字段走原生协议，不会触发 __getattr__；这里确保不递归
+        """主拦截点：每次插件取属性都会过检查。
+
+        允许逻辑：
+        1. 黑名单属性 → 拒绝
+        2. _ 开头私有属性 → 拒绝
+        3. _ALWAYS_ALLOWED 基础方法 → 放行
+        4. manifest 声明的权限方法 → 放行
+        5. 其它 → 拒绝
+        """
+        # 黑名单二次检查（即使上面 __getattribute__ 已经处理，这里作为纵深防御）
+        if name in _BLOCKED_ATTRS:
+            raise PermissionError(
+                f"插件 {self._plugin_key!r} 禁止访问 client.{name}"
+            )
+        # 私有属性
         if name.startswith("_"):
             raise PermissionError(
                 f"插件 {self._plugin_key!r} 禁止访问私有属性 client.{name}"
             )
         if name in _ALWAYS_ALLOWED or name in self._allowed:
             return getattr(self._real, name)
-        # 不在允许集内 → 抛 PermissionError；plugin 应在 manifest.permissions 中声明
+        # 不在允许集内 → 抛 PermissionError
         raise PermissionError(
             f"插件 {self._plugin_key!r} 缺少权限调用 client.{name}; "
             f"请在 manifest.permissions 中声明对应能力（持有: {self._perms}）"

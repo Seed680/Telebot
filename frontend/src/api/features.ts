@@ -15,6 +15,62 @@ export async function getFeatureMatrix(): Promise<FeatureMatrixResponse> {
   return data;
 }
 
+// ===================== 插件配置 API =====================
+
+/** 获取插件的 global config */
+export async function getPluginGlobalConfig(pluginKey: string): Promise<Record<string, unknown>> {
+  const { data } = await api.get<{ plugin_key: string; config: Record<string, unknown> }>(
+    `/api/plugins/${pluginKey}/config`
+  );
+  return data.config;
+}
+
+/** 设置插件的 global config */
+export async function setPluginGlobalConfig(
+  pluginKey: string,
+  config: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const { data } = await api.put<{ plugin_key: string; config: Record<string, unknown> }>(
+    `/api/plugins/${pluginKey}/config`,
+    { config }
+  );
+  return data.config;
+}
+
+/** 获取某账号某插件的最终生效配置（合并后） */
+export async function getEffectiveConfig(
+  aid: number,
+  pluginKey: string
+): Promise<Record<string, unknown>> {
+  const { data } = await api.get<Record<string, unknown>>(
+    `/api/accounts/${aid}/features/${pluginKey}/config`
+  );
+  return data;
+}
+
+/** 更新账号级插件配置（仅更新 config，不改变 enabled） */
+export async function updateAccountFeatureConfig(
+  aid: number,
+  pluginKey: string,
+  config: Record<string, unknown>
+): Promise<void> {
+  await api.patch(`/api/accounts/${aid}/features/${pluginKey}/config`, { config });
+}
+
+/** 验证配置是否符合 schema */
+export async function validatePluginConfig(
+  pluginKey: string,
+  config: Record<string, unknown>
+): Promise<{ valid: boolean; errors: Array<{ field: string; message: string }> }> {
+  const { data } = await api.post<{ valid: boolean; errors: Array<{ field: string; message: string }> }>(
+    `/api/plugins/${pluginKey}/config/validate`,
+    { config }
+  );
+  return data;
+}
+
+// ===================== 规则 API =====================
+
 export async function listRules(
   aid: number,
   feature: string,

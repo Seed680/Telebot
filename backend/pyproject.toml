@@ -45,6 +45,7 @@ dependencies = [
     "anyio>=4.4.0",
     "tenacity>=8.3.0",
     "croniter>=3.0.0",
+    "jsonschema>=4.23.0",
 ]
 
 [project.optional-dependencies]

@@ -486,3 +486,110 @@ def test_presets_render_with_full_ctx(preset: str) -> None:
     )
     assert out
     assert "答" in out
+
+
+# ════════════════════════════════════════════════════════════
+# 10) 长消息分段测试
+# ════════════════════════════════════════════════════════════
+
+
+def test_split_long_message_short_text() -> None:
+    """短文本不分割。"""
+    from app.worker.command import _split_long_message
+
+    text = "Hello, world!"
+    parts = _split_long_message(text, threshold=4000)
+    assert len(parts) == 1
+    assert parts[0] == text
+
+
+def test_split_long_message_by_paragraphs() -> None:
+    """按段落分割长文本。"""
+    from app.worker.command import _split_long_message
+
+    para = "A" * 2000
+    text = f"{para}\n\n{para}\n\n{para}"
+    parts = _split_long_message(text, threshold=3000)
+    # 应该至少有 2 段
+    assert len(parts) >= 2
+    for part in parts:
+        assert len(part) <= 3000
+
+
+def test_split_long_message_single_long_paragraph() -> None:
+    """单个超长段落按句子分割。"""
+    from app.worker.command import _split_long_message
+
+    sentence = "这是测试句子。" * 500
+    parts = _split_long_message(sentence, threshold=2000)
+    assert len(parts) >= 2
+    for part in parts:
+        assert len(part) <= 2000
+
+
+def test_split_long_message_empty() -> None:
+    """空文本处理。"""
+    from app.worker.command import _split_long_message
+
+    parts = _split_long_message("", threshold=100)
+    assert parts == [""]
+
+
+def test_ensure_html_safe_closes_tags() -> None:
+    """_ensure_html_safe 补全未闭合的 HTML 标签。"""
+    from app.worker.command import _ensure_html_safe
+
+    text = "<b>未闭合的粗体</b>\n\n<i>未闭合的斜体"
+    safe = _ensure_html_safe(text)
+    # 应该补全 </i>
+    assert "</i>" in safe
+    # 已闭合的不应重复
+    assert safe.count("</b>") == 1
+
+
+def test_ensure_html_safe_preserves_valid() -> None:
+    """有效的 HTML 保持不变。"""
+    from app.worker.command import _ensure_html_safe
+
+    text = "<b>粗体</b>\n<i>斜体</i>\n<code>代码</code>"
+    safe = _ensure_html_safe(text)
+    assert safe == text
+
+
+def test_safe_exception_text_strips_sk_key() -> None:
+    """_safe_exception_text 正确脱敏 sk- token。"""
+    from app.worker.command import _safe_exception_text
+
+    e = RuntimeError("auth failed: token sk-veryverysecret-XYZ rejected")
+    msg = _safe_exception_text(e)
+    assert "sk-veryverysecret-XYZ" not in msg
+    assert "<redacted>" in msg
+
+
+def test_safe_exception_text_strips_bearer_token() -> None:
+    """_safe_exception_text 正确脱敏 Bearer token。"""
+    from app.worker.command import _safe_exception_text
+
+    e = RuntimeError("auth failed: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9")
+    msg = _safe_exception_text(e)
+    assert "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" not in msg
+
+
+def test_safe_log_text_does_not_log_full_content() -> None:
+    """_safe_log_text 不记录完整原文。"""
+    from app.worker.command import _safe_log_text
+
+    long_text = "A" * 500
+    msg = _safe_log_text(long_text, max_len=100)
+    # 应该显示长度和预览，而不是完整内容
+    assert "<len=500>" in msg
+    assert "AAA" not in msg or msg.count("A") < 100
+
+
+def test_safe_log_text_masks_tokens() -> None:
+    """_safe_log_text 脱敏 token。"""
+    from app.worker.command import _safe_log_text
+
+    text = "sk-my-secret-key-12345"
+    msg = _safe_log_text(text)
+    assert "sk-my-secret" not in msg

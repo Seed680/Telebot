@@ -51,6 +51,19 @@ def _pick_provider(providers: dict[int, dict[str, Any]]) -> tuple[int, dict[str,
     return None
 
 
+def _dto_to_fake_row(dto) -> "LLMProviderModel":  # type: ignore[name-defined]
+    """将 LLMProviderDTO 转为临时 ORM 行（向后兼容 build_client）。"""
+    return LLMProviderModel(
+        id=dto.id,
+        name=dto.name,
+        provider=dto.provider,
+        api_key_enc=dto.api_key_enc,
+        base_url=dto.base_url,
+        default_model=dto.default_model,
+        api_format=dto.api_format,
+    )
+
+
 async def fy_handler(client, event, args, account_id, ctx):
     replied = await event.get_reply_message()
     if replied is None:
@@ -90,19 +103,23 @@ async def fy_handler(client, event, args, account_id, ctx):
     await event.edit(f"翻译中... ({provider_dict.get('name', provider_id)})")
 
     from app.services.llm_client import LLMError, build_client
+    from app.services.llm_dto import LLMProviderDTO
 
-    fake_row = LLMProviderModel(
+    # 使用 LLMProviderDTO 替代手搓 fake ORM row，修复 api_format/proxy 丢失问题
+    provider_dto = LLMProviderDTO(
         id=provider_id,
         name=str(provider_dict.get("name", "")),
         provider=str(provider_dict.get("provider", "")),
-        api_key_enc=provider_dict.get("api_key_enc"),
+        api_format=provider_dict.get("api_format"),  # 修复：补充 api_format
         base_url=provider_dict.get("base_url"),
         default_model=str(provider_dict.get("default_model", "")),
+        api_key_enc=provider_dict.get("api_key_enc"),
+        proxy_url=provider_dict.get("proxy_url"),  # 修复：补充 proxy_url
     )
 
     try:
         llm = build_client(
-            fake_row,
+            _dto_to_fake_row(provider_dto),
             override_model=provider_dict.get("default_model"),
             proxy_url=provider_dict.get("proxy_url"),
         )

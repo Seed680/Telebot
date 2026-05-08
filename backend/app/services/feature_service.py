@@ -8,6 +8,11 @@ API 层调本服务而不直接读写 ORM，便于以后引入更复杂的状态
 - ``seed_builtin_features`` 每次调用时强制刷新 ``BUILTIN_FEATURES``（动态扫描 builtin 目录），
   保证新增 builtin 插件目录后，主进程调用任意 API 都能立即把新行写入 ``feature`` 表。
 - worker 端 ``reload_account_config`` 也会刷新注册表后重激活，两侧相互独立。
+
+Global Config 设计：
+- global config 存储在 ``Feature.manifest["global_config"]`` 中，为所有账号共享。
+- 配置合并顺序：schema defaults < global config < account config。
+- 为将来迁移到独立表（如 PluginGlobalConfig）预留封装。
 """
 
 from __future__ import annotations
@@ -16,6 +21,8 @@ import logging
 from collections.abc import Iterable
 from typing import Any
 
+import jsonschema
+from jsonschema import Draft7Validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +35,7 @@ from ..db.models.feature import (
     Feature,
 )
 from ..redis_client import get_redis
+from ..schemas.feature import ConfigValidationError, ConfigValidationResponse
 from ..worker.ipc import CMD_RELOAD_CONFIG, cmd_channel, make_cmd
 
 log = logging.getLogger(__name__)
@@ -261,11 +269,168 @@ async def _notify_reload(account_id: int) -> None:
         log.debug("通知 worker reload 失败 account=%s", account_id, exc_info=True)
 
 
+# ─────────────────────────────────────────────────────
+# Global Config（未来可迁移到独立表）
+# ─────────────────────────────────────────────────────
+async def get_plugin_global_config(db: AsyncSession, plugin_key: str) -> dict[str, Any]:
+    """获取插件的 global config。
+
+    Global config 存储在 Feature.manifest["global_config"] 中。
+    返回空 dict 如果不存在。
+    """
+    await seed_builtin_features(db)
+    feature = await db.get(Feature, plugin_key)
+    if feature is None:
+        return {}
+    manifest = feature.manifest or {}
+    return manifest.get("global_config", {})
+
+
+async def set_plugin_global_config(
+    db: AsyncSession,
+    plugin_key: str,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """设置插件的 global config。
+
+    - 验证 config 是否符合 config_schema（如果有）。
+    - 保存到 Feature.manifest["global_config"]。
+    - 通知所有已启用该插件的账号的 worker reload。
+
+    返回验证后的 config。
+    """
+    await seed_builtin_features(db)
+    feature = await db.get(Feature, plugin_key)
+    if feature is None:
+        raise ValueError(f"Plugin not found: {plugin_key}")
+
+    # 验证 config_schema
+    config_schema = (feature.manifest or {}).get("config_schema")
+    if config_schema:
+        validation = validate_config_against_schema(config, config_schema)
+        if not validation.valid:
+            error_msgs = [f"{e.field}: {e.message}" for e in validation.errors]
+            raise ValueError(f"Config validation failed: {'; '.join(error_msgs)}")
+
+    # 提取 global 字段（level === "global" 的字段）
+    if config_schema and "properties" in config_schema:
+        global_fields = {
+            k for k, v in config_schema["properties"].items()
+            if isinstance(v, dict) and v.get("level") == "global"
+        }
+        global_config = {k: v for k, v in config.items() if k in global_fields}
+    else:
+        # 如果没有 level 标记，全部视为 account config
+        global_config = {}
+
+    # 更新 manifest
+    manifest = feature.manifest or {}
+    manifest["global_config"] = global_config
+    feature.manifest = manifest
+    await db.commit()
+
+    # 通知所有使用该插件的账号的 worker reload
+    await _notify_all_accounts_using_feature(db, plugin_key)
+
+    return global_config
+
+
+async def _notify_all_accounts_using_feature(db: AsyncSession, plugin_key: str) -> None:
+    """通知所有已启用指定插件的账号的 worker reload。"""
+    rows = (
+        await db.execute(
+            select(AccountFeature).where(
+                AccountFeature.feature_key == plugin_key,
+                AccountFeature.enabled == True,  # noqa: E712
+            )
+        )
+    ).scalars().all()
+    for af in rows:
+        await _notify_reload(af.account_id)
+
+
+async def get_effective_plugin_config(
+    db: AsyncSession,
+    aid: int,
+    plugin_key: str,
+) -> dict[str, Any]:
+    """获取某账号某插件的最终生效配置。
+
+    合并顺序：schema defaults < global config < account config
+
+    - 如果 Feature 没有 config_schema，返回 AccountFeature.config。
+    - 如果 AccountFeature 不存在，返回 global config 或 schema defaults。
+    """
+    await seed_builtin_features(db)
+    feature = await db.get(Feature, plugin_key)
+    if feature is None:
+        return {}
+
+    config_schema = (feature.manifest or {}).get("config_schema")
+    global_config = (feature.manifest or {}).get("global_config", {})
+
+    # 获取账号配置
+    af = (
+        await db.execute(
+            select(AccountFeature).where(
+                AccountFeature.account_id == aid,
+                AccountFeature.feature_key == plugin_key,
+            )
+        )
+    ).scalar_one_or_none()
+    account_config = dict(af.config) if af else {}
+
+    # 提取 schema defaults
+    defaults: dict[str, Any] = {}
+    if config_schema and "properties" in config_schema:
+        for prop_name, prop_def in config_schema["properties"].items():
+            if isinstance(prop_def, dict) and "default" in prop_def:
+                defaults[prop_name] = prop_def["default"]
+
+    # 合并：defaults < global < account
+    result = {**defaults}
+    result.update(global_config)
+    result.update(account_config)
+    return result
+
+
+def validate_config_against_schema(
+    config: dict[str, Any],
+    config_schema: dict[str, Any],
+) -> ConfigValidationResponse:
+    """验证配置是否符合 JSON Schema。
+
+    返回验证结果，包含错误列表。
+    """
+    try:
+        validator = Draft7Validator(config_schema)
+        errors: list[ConfigValidationError] = []
+        for error in validator.iter_errors(config):
+            path = ".".join(str(p) for p in error.path) if error.path else "root"
+            errors.append(ConfigValidationError(
+                field=path,
+                message=error.message,
+            ))
+        return ConfigValidationResponse(
+            valid=len(errors) == 0,
+            errors=errors,
+        )
+    except Exception as e:
+        return ConfigValidationResponse(
+            valid=False,
+            errors=[ConfigValidationError(field="schema", message=str(e))],
+        )
+
+
 __all__ = [
     "bulk_set_enabled",
     "feature_matrix",
     "get_account_features",
+    "get_effective_plugin_config",
+    "get_plugin_global_config",
     "list_features",
     "seed_builtin_features",
     "set_account_feature",
+    "set_plugin_global_config",
+    "validate_config_against_schema",
 ]

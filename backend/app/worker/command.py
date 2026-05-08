@@ -25,6 +25,10 @@ from .ipc import CMD_PAUSE, CMD_RESUME, cmd_channel, make_cmd
 
 log = logging.getLogger(__name__)
 
+# 长消息分段常量
+_LONG_MESSAGE_THRESHOLD = 3900  # TG 单条上限约 4096，预留缓冲
+_LONG_MESSAGE_SAFE_THRESHOLD = 3900
+
 BuiltinHandler = Callable[..., Awaitable[None]]
 
 
@@ -35,10 +39,23 @@ class BuiltinCmd:
     doc: str = ""
 
 
+@dataclass(frozen=True)
+class PluginCmd:
+    """插件命令记录（用于追踪和注销）。"""
+
+    handler: BuiltinHandler
+    owner_plugin_key: str  # 所属插件的 key
+    generation: int  # 插件实例的 generation，用于检测旧 handler
+
+
 # key 是主命令名（不含前缀）
 _BUILTIN: dict[str, BuiltinCmd] = {}
 # key 是"主命令 + alias"全集，value 是主命令名
 _BUILTIN_ALIAS_TO_PRIMARY: dict[str, str] = {}
+
+# 插件命令注册表：追踪命令 -> (plugin_key, generation, handler)
+# 用于插件 reload/disable 时注销旧命令
+_PLUGIN_COMMANDS: dict[str, PluginCmd] = {}
 
 
 # ── 模板命令派发上下文 ──────────────────────────────────────────
@@ -126,6 +143,229 @@ def _safe_exception_text(e: BaseException, max_len: int = 200) -> str:
     if len(msg) > max_len:
         msg = msg[:max_len] + "…"
     return msg
+
+
+def _safe_log_text(text: str, max_len: int = 200) -> str:
+    """把用户内容净化成"可安全记录日志"的形式。
+
+    不记录完整原文，只记录长度和前 N 个字符的预览。
+    用于 debug 日志，避免完整私聊内容被写入日志。
+    """
+    if not text:
+        return "<empty>"
+    length = len(text)
+    preview = text[:max_len] if len(text) > max_len else text
+    # 对预览做简单脱敏（去掉可能的 token）
+    import re
+    preview = re.sub(r"sk-[A-Za-z0-9_-]{4,}", "<sk>", preview)
+    if length > max_len:
+        return f'<len={length}> "{preview}..."'
+    return f'<len={length}> "{preview}"'
+
+
+def _dto_to_fake_row(dto) -> "LLMProviderModel":  # type: ignore[name-defined]
+    """将 LLMProviderDTO 转为临时 ORM 行（向后兼容 build_client）。"""
+    from ..db.models.command import LLMProvider as LLMProviderModel
+
+    return LLMProviderModel(
+        id=dto.id,
+        name=dto.name,
+        provider=dto.provider,
+        api_key_enc=dto.api_key_enc,
+        base_url=dto.base_url,
+        default_model=dto.default_model,
+        api_format=dto.api_format,
+    )
+
+
+def _split_long_message(
+    text: str,
+    threshold: int = _LONG_MESSAGE_THRESHOLD,
+) -> list[str]:
+    """将长文本分割为多个短消息。
+
+    策略：
+    1. 如果文本长度 <= threshold，直接返回单段
+    2. 否则按段落/句子分割，确保每段不超过 threshold
+    3. 优先按双换行分割（段落），其次按单换行，最后按句子
+
+    Args:
+        text: 原始文本
+        threshold: 每段最大字符数（默认 3900）
+
+    Returns:
+        分割后的文本列表
+    """
+    if len(text) <= threshold:
+        return [text]
+
+    parts: list[str] = []
+
+    # 策略 1: 按双换行分割（段落）
+    paragraphs = text.split("\n\n")
+    current = ""
+    for para in paragraphs:
+        if len(current) + len(para) + 2 <= threshold:
+            current = (current + "\n\n" + para).strip()
+        else:
+            if current:
+                parts.append(current)
+            # 单段落超长，继续分割
+            if len(para) > threshold:
+                current = _split_single_block(para, threshold)
+            else:
+                current = para
+
+    if current:
+        parts.append(current)
+
+    # 合并策略 2: 如果分割后仍然有过长的段，进一步拆分
+    final_parts: list[str] = []
+    for part in parts:
+        if len(part) <= threshold:
+            final_parts.append(part)
+        else:
+            final_parts.extend(_split_single_block(part, threshold))
+
+    return final_parts
+
+
+def _split_single_block(text: str, threshold: int) -> str:
+    """分割超长文本块，优先按换行，其次按句子。"""
+    if len(text) <= threshold:
+        return text
+
+    # 尝试按换行分割
+    lines = text.split("\n")
+    current = ""
+    for line in lines:
+        if len(current) + len(line) + 1 <= threshold:
+            current = (current + "\n" + line).strip()
+        else:
+            if current:
+                # 递归处理剩余部分
+                remaining = "\n".join(lines[lines.index(line):])
+                return current + "\n\n" + _split_single_block(remaining, threshold)
+            # 单行就超长，按句子分割
+            return _split_by_sentence(text, threshold)
+
+    return current
+
+
+def _split_by_sentence(text: str, threshold: int) -> str:
+    """按句子分割超长文本。"""
+    import re
+    sentences = re.split(r"([。！？.!?\n])", text)
+    current = ""
+    result_parts: list[str] = []
+
+    for i in range(0, len(sentences) - 1, 2):
+        sent = sentences[i] + (sentences[i + 1] if i + 1 < len(sentences) else "")
+        if len(current) + len(sent) <= threshold:
+            current += sent
+        else:
+            if current:
+                result_parts.append(current)
+            if len(sent) > threshold:
+                # 超长句子，按字符硬截断
+                result_parts.append(sent[:threshold])
+                current = sent[threshold:]
+            else:
+                current = sent
+
+    if current:
+        result_parts.append(current)
+
+    return "\n\n".join(result_parts)
+
+
+async def _send_long_message(
+    client,
+    chat_id: int,
+    text: str,
+    first_msg_id: int | None,
+    parse_mode: str | None = None,
+    *,
+    _max_chunk: int = _LONG_MESSAGE_THRESHOLD,
+) -> None:
+    """发送长消息，自动分段。
+
+    策略：
+    1. 将消息分割成多个短段落
+    2. 第一段用 edit_message（保留 reply 链）
+    3. 后续段落用 send_message
+
+    Args:
+        client: Telegram client
+        chat_id: 目标 chat ID
+        text: 消息文本
+        first_msg_id: 原始命令消息 ID（用于第一段 edit）
+        parse_mode: parse_mode（'html' / 'md' / None）
+    """
+    chunks = _split_long_message(text, _max_chunk)
+
+    if not chunks:
+        return
+
+    first = chunks[0]
+    remaining = chunks[1:]
+
+    # 第一段：优先用 edit
+    if first_msg_id:
+        try:
+            await client.edit_message(chat_id, first_msg_id, first, parse_mode=parse_mode)
+        except Exception:
+            # edit 失败时降级为纯文本
+            try:
+                await client.edit_message(chat_id, first_msg_id, first)
+            except Exception:
+                # 再失败就发送新消息
+                await client.send_message(chat_id, first)
+    else:
+        await client.send_message(chat_id, first, parse_mode=parse_mode)
+
+    # 后续段落：send_message
+    for chunk in remaining:
+        # 检查是否是 HTML 模式，如果是，需要确保标签闭合
+        if parse_mode == "html":
+            chunk = _ensure_html_safe(chunk)
+        try:
+            await client.send_message(chat_id, chunk, parse_mode=parse_mode)
+        except Exception:
+            # 发送失败时降级为纯文本
+            try:
+                await client.send_message(chat_id, chunk)
+            except Exception:
+                # 最坏情况：丢弃该段落
+                pass
+
+
+def _ensure_html_safe(text: str) -> str:
+    """确保 HTML 文本安全（避免截断导致标签不闭合）。
+
+    策略：
+    1. 检测未闭合的标签
+    2. 补全或移除未闭合标签
+    """
+    import re
+
+    # 检测可能未闭合的标签
+    # 匹配 <tag...> 但没有对应的 </tag>
+    unclosed_patterns = [
+        (r"<b>(?!</b>)", "</b>"),
+        (r"<i>(?!</i>)", "</i>"),
+        (r"<code>(?!</code>)", "</code>"),
+        (r"<pre>(?!</pre>)", "</pre>"),
+        (r"<blockquote>(?!</blockquote>)", "</blockquote>"),
+    ]
+
+    result = text
+    for pattern, closing in unclosed_patterns:
+        if re.search(pattern, result) and closing not in result:
+            # 找到未闭合标签，在文本末尾补上
+            result = result + "\n" + closing
+
+    return result
 
 
 async def _check_sudo_permission(event, cmd: str, account_id: int) -> tuple[bool, str]:
@@ -640,12 +880,68 @@ async def _cmd_plugin(client, event, args, account_id):
 _register_builtin_aliases()
 
 
-def register_plugin_command(name: str, fn: Callable):
-    """允许其他模块（主要是 D Agent 插件）注册命令；不会覆盖内置。"""
+def register_plugin_command(name: str, fn: Callable, *, owner_plugin_key: str = "", generation: int = 0):
+    """允许其他模块（主要是 D Agent 插件）注册命令；不会覆盖内置。
+
+    **安全：追踪 owner_plugin_key 和 generation，用于插件 reload/disable 时注销旧命令。**
+
+    Args:
+        name: 命令名（不含前缀）
+        fn: 命令处理函数
+        owner_plugin_key: 所属插件的 key
+        generation: 插件实例的 generation
+    """
     if name in _BUILTIN_ALIAS_TO_PRIMARY:
-        return  # 不覆盖
+        return  # 不覆盖内置命令
     _BUILTIN[name] = BuiltinCmd(handler=fn)
+    _PLUGIN_COMMANDS[name] = PluginCmd(
+        handler=fn,
+        owner_plugin_key=owner_plugin_key,
+        generation=generation,
+    )
     _register_builtin_aliases()
+
+
+def unregister_plugin_command(name: str, *, owner_plugin_key: str | None = None):
+    """注销插件命令。
+
+    **安全设计**：
+    - 如果指定了 owner_plugin_key，只注销该插件注册的命令
+    - 如果未指定 owner_plugin_key，注销所有同名命令
+    - 命令注销后，旧 handler 不会再被触发
+
+    Args:
+        name: 命令名
+        owner_plugin_key: 如果指定，只注销该插件的命令
+    """
+    if name in _BUILTIN:
+        cmd = _BUILTIN[name]
+        # 内置命令不能被注销
+        return
+
+    # 从插件命令表中注销
+    if name in _PLUGIN_COMMANDS:
+        pcmd = _PLUGIN_COMMANDS[name]
+        if owner_plugin_key is None or pcmd.owner_plugin_key == owner_plugin_key:
+            _PLUGIN_COMMANDS.pop(name, None)
+            # 如果命令也被添加到 _BUILTIN（通过 register_plugin_command），也移除
+            _BUILTIN.pop(name, None)
+            # 更新别名映射
+            _BUILTIN_ALIAS_TO_PRIMARY.pop(name, None)
+
+
+def unregister_all_plugin_commands(*, owner_plugin_key: str):
+    """注销指定插件注册的所有命令。
+
+    Args:
+        owner_plugin_key: 插件的 key
+    """
+    to_remove = [
+        name for name, pcmd in _PLUGIN_COMMANDS.items()
+        if pcmd.owner_plugin_key == owner_plugin_key
+    ]
+    for name in to_remove:
+        unregister_plugin_command(name, owner_plugin_key=owner_plugin_key)
 
 
 # ════════════════════════════════════════════════════════════
@@ -904,8 +1200,10 @@ async def _run_ai(client, event, args, tpl: dict[str, Any], account_id: int) -> 
     has_self_audio = message_has_audio(self_msg)
     has_any_audio = has_replied_audio or has_self_audio
     log.warning(
-        "[ai-debug] replied=%s text=%r q=%r img(replied=%s,self=%s) audio(replied=%s,self=%s)",
-        replied is not None, replied_text, user_q,
+        "[ai-debug] replied=%s text=%s q=%s img(replied=%s,self=%s) audio(replied=%s,self=%s)",
+        replied is not None,
+        _safe_log_text(replied_text or ""),
+        _safe_log_text(user_q),
         has_replied_image, has_self_image, has_replied_audio, has_self_audio,
     )
 
@@ -1087,23 +1385,27 @@ async def _run_ai(client, event, args, tpl: dict[str, Any], account_id: int) -> 
 
     # build_client 在内部解密 api_key；导入时点放函数内，避免循环依赖
     from ..db.models.command import LLMProvider as LLMProviderModel
-    from ..services.llm_client import LLMError, build_client
+    from ..services.llm_client import LLMCallFailed, LLMError, build_client
+    from ..services.llm_dto import LLMProviderDTO
 
-    # 用一个 in-memory dataclass-like 对象传给 build_client 即可（属性访问相同）
-    # 直接构造一个临时 ORM 对象（不绑定 session）保证字段一致
-    fake_row = LLMProviderModel(
+    # 使用 LLMProviderDTO 替代手搓 fake ORM row
+    provider_dto = LLMProviderDTO(
         id=int(chosen_provider_id),
         name=str(provider_dict.get("name", "")),
         provider=str(provider_dict.get("provider", "")),
-        api_key_enc=provider_dict.get("api_key_enc"),
+        api_format=provider_dict.get("api_format"),
         base_url=provider_dict.get("base_url"),
         default_model=str(provider_dict.get("default_model", "")),
-        api_format=provider_dict.get("api_format"),
+        api_key_enc=provider_dict.get("api_key_enc"),
+        proxy_url=provider_dict.get("proxy_url"),
+        modality=str(provider_dict.get("modality", "text")),
+        tags=list(provider_dict.get("tags") or []),
+        cost_tier=int(provider_dict.get("cost_tier", 2) or 2),
     )
 
     try:
         llm = build_client(
-            fake_row,
+            _dto_to_fake_row(provider_dto),
             override_model=override_model,
             proxy_url=provider_dict.get("proxy_url"),
         )
@@ -1171,6 +1473,13 @@ async def _run_ai(client, event, args, tpl: dict[str, Any], account_id: int) -> 
             max_tokens=max_tokens,
             images=image_bytes_list or None,
         )
+    except LLMCallFailed as e:
+        # message 已在 LLMError 内脱敏；LLMCallFailed 包含 provider 信息
+        err_msg = str(e)
+        if e.provider_name:
+            err_msg = f"[{e.provider_name}] {err_msg}"
+        await event.edit(f"✗ AI 调用失败：{err_msg[:300]}")
+        return
     except LLMError as e:
         # message 已在 LLMError 内脱敏
         await event.edit(f"✗ AI 调用失败：{e}")
@@ -1235,6 +1544,23 @@ async def _run_ai(client, event, args, tpl: dict[str, Any], account_id: int) -> 
         parse_mode_arg = "md"
     else:
         parse_mode_arg = None  # plain
+
+    # 检查消息长度，超过阈值时使用分段发送
+    if len(body) > _LONG_MESSAGE_THRESHOLD:
+        await _send_long_message(
+            client,
+            event.chat_id,
+            body,
+            event.id if send_mode == "edit" else None,
+            parse_mode_arg,
+        )
+        # send_new 模式下也需要删除原命令消息
+        if send_mode == "send_new":
+            try:
+                await event.delete()
+            except Exception:  # noqa: BLE001
+                pass
+        return
 
     if send_mode == "send_new":
         # 删命令 + 发新消息（不附 reply_to）

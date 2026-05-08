@@ -49,6 +49,15 @@ export async function resumeAccount(aid: number): Promise<void> {
   await api.post(`/api/accounts/${aid}/resume`);
 }
 
+// 更新账号级插件配置（仅更新 config，不改变 enabled）
+export async function updateAccountFeatureConfig(
+  aid: number,
+  pluginKey: string,
+  config: Record<string, unknown>,
+): Promise<void> {
+  await api.patch(`/api/accounts/${aid}/features/${pluginKey}/config`, { config });
+}
+
 // ===================== 绑定向导 =====================
 export async function loginStart(
   payload: AccountStartLoginRequest,
