@@ -11,6 +11,70 @@
 ---
 
 
+## [0.9.6] — 2026-05-09 · fix · 插件配置弹窗修复 + 远程插件安全加固
+
+### Fixed
+- 前端插件配置弹窗崩溃：修复 ConfigDialog hook 顺序，补全 enum / array 字段渲染
+- 内置功能配置入口统一：插件页、账号详情页的「配置」按钮改为跳转真实功能页
+- 插件管理页已安装列表补齐版本列和操作列
+
+### Changed
+- 远程插件安全闭环继续加固：安装阶段只读 plugin.json，worker默认不再扫描执行 installed 插件，只有 RemotePlugin.enabled + AccountFeature.enabled 双开关通过后才按需加载
+- 远程插件热加载从不适配第三方的 reload_plugin 改走 reload_config，支持按 plugin_key 强制卸载旧实例后重载
+
+---
+
+## [0.9.5] — 2026-05-08 · chore · Codex 审查合并 + 仓库清理
+
+### Changed
+- 合并 Codex GPT-5.5 审查产出的代码改动（sandbox、LLM runtime、测试用例等）
+- 清理非必要文件（archive/、agent-plans/、审查文档）
+- 更新 .gitignore 排除开发计划与归档目录
+
+---
+
+## [0.9.4] — 2026-05-08 · feature · 插件配置系统 + 账号级配置统一
+
+### Added
+- 新建 ConfigDialog 组件：JSON Schema 驱动的自动表单渲染
+- Feature API 返回 config_schema
+- 内置插件 config_schema 补全：game24 / scheduler / translate
+
+### Changed
+- 账号详情「功能开关」更名为「插件启停」
+- Account Detail 和 Extensions 的「配置」按钮统一为 ConfigDialog 弹窗
+- 所有 Feature 配置页返回按钮改为 /accounts/:aid?tab=features
+- Account Detail Tab 支持 URL 参数 ?tab= 控制默认激活项
+- 插件开发指南补充 config_schema 规范（level 字段 + 验证清单）
+
+---
+
+## [0.9.3] — 2026-05-08 · fix · 插件中心重构 + 版本号 bump
+
+### Changed
+- 插件中心从 4 Tab 重构为 3 Tab（账号插件管理 / 插件管理 / 开发指南）
+- 废弃功能矩阵（NxM 格子），替换为账号级插件管理
+- 合并本地内置插件、第三方插件、远程插件到统一列表
+
+---
+
+## [0.9.2] — 2026-05-08 · feature · 插件中心重构 + 账号级插件管理
+
+### Added
+- 远程插件安装支持 default_enabled 参数
+- 账号级远程插件管理 API（enable-accounts / disable-accounts）
+- 新建 Alembic 迁移 0019（remote_plugin.default_enabled）
+
+---
+
+## [0.9.1] — 2026-05-08 · fix · 远程插件 API 导入修复
+
+### Fixed
+- remote_plugin.py API 导入 get_db 路径错误（应为 deps.DBSession）
+- 移除未使用的 Depends / AsyncSession / select 导入
+
+---
+
 ## [0.9.0] — 2026-05-08 · feature · 远程插件管理系统 + 安全加固
 
 ### Added

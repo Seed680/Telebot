@@ -70,6 +70,28 @@ class TestRemotePluginSecurity:
             svc._read_plugin_metadata(plugin_dir, fallback_name="bad")
         assert ex.value.code == "PLUGIN_JSON_NOT_FOUND"
 
+    def test_runtime_discovery_does_not_execute_installed_by_default(self, monkeypatch, tmp_path):
+        """worker 刷新 builtin 注册表时不能顺手执行 installed 插件代码。"""
+        from app.worker.plugins import loader as loader_mod
+        import os as _os
+
+        monkeypatch.setattr(svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        monkeypatch.delenv("EVIL_RUNTIME_DISCOVERY", raising=False)
+
+        plugin_dir = tmp_path / "installed" / "evil_runtime"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "__init__.py").write_text(
+            'import os\n'
+            'os.environ["EVIL_RUNTIME_DISCOVERY"] = "pwned"\n'
+            "PLUGIN_CLASS = None\n"
+            "MANIFEST = None\n",
+            encoding="utf-8",
+        )
+
+        loader_mod.discover_plugins()
+
+        assert "EVIL_RUNTIME_DISCOVERY" not in _os.environ
+
     # ── 2. source_url scheme 白名单 ───────────────────────────────
 
     def test_validate_source_url_rejects_file_scheme(self):

@@ -27,6 +27,8 @@ export interface ConfigField {
   key: string;
   title?: string;
   type: string;
+  enum?: Array<string | number | boolean>;
+  items?: { type?: string };
   default?: unknown;
   description?: string;
   minimum?: number;
@@ -61,6 +63,20 @@ export function ConfigDialog({
   const [globalVals, setGlobalVals] = useState<Record<string, unknown>>({});
   const [accountVals, setAccountVals] = useState<Record<string, unknown>>({});
   const [saving, setSaving] = useState(false);
+
+  const handleSave = useCallback(async () => {
+    if (!onSave) return;
+    setSaving(true);
+    try {
+      await onSave(globalVals, accountVals);
+      toast.success("配置已保存");
+      onOpenChange(false);
+    } catch (err) {
+      toast.error(getErrMsg(err));
+    } finally {
+      setSaving(false);
+    }
+  }, [onSave, globalVals, accountVals, onOpenChange]);
 
   // 初始化配置值
   useEffect(() => {
@@ -99,20 +115,6 @@ export function ConfigDialog({
 
   const globalFields = Object.entries(s.properties).filter(([, f]) => f.level === "global");
   const accountFields = Object.entries(s.properties).filter(([, f]) => f.level !== "global");
-
-  const handleSave = useCallback(async () => {
-    if (!onSave) return;
-    setSaving(true);
-    try {
-      await onSave(globalVals, accountVals);
-      toast.success("配置已保存");
-      onOpenChange(false);
-    } catch (err) {
-      toast.error(getErrMsg(err));
-    } finally {
-      setSaving(false);
-    }
-  }, [onSave, globalVals, accountVals, onOpenChange]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -172,6 +174,28 @@ interface FieldInputProps {
 
 function FieldInput({ fk, field, value, onChange }: FieldInputProps) {
   const label = field.title || fk;
+  const description = field.description;
+
+  if (field.enum && field.enum.length > 0) {
+    return (
+      <div>
+        <label className="text-sm font-medium">{label}</label>
+        {description && <p className="text-xs text-muted-foreground">{description}</p>}
+        <select
+          value={value != null ? String(value) : ""}
+          onChange={(e) => onChange(e.target.value)}
+          className="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm"
+        >
+          {!field.enum.some((v) => String(v) === "") && <option value="">未设置</option>}
+          {field.enum.map((opt) => (
+            <option key={String(opt)} value={String(opt)}>
+              {String(opt)}
+            </option>
+          ))}
+        </select>
+      </div>
+    );
+  }
 
   if (field.type === "boolean") {
     return (
@@ -184,7 +208,7 @@ function FieldInput({ fk, field, value, onChange }: FieldInputProps) {
         />
         <div>
           <span className="font-medium">{label}</span>
-          {field.description && <span className="ml-2 text-xs text-muted-foreground">{field.description}</span>}
+          {description && <span className="ml-2 text-xs text-muted-foreground">{description}</span>}
         </div>
       </label>
     );
@@ -194,7 +218,7 @@ function FieldInput({ fk, field, value, onChange }: FieldInputProps) {
     return (
       <div>
         <label className="text-sm font-medium">{label}</label>
-        {field.description && <p className="text-xs text-muted-foreground">{field.description}</p>}
+        {description && <p className="text-xs text-muted-foreground">{description}</p>}
         <input
           type="number"
           value={value != null ? String(value) : ""}
@@ -213,11 +237,38 @@ function FieldInput({ fk, field, value, onChange }: FieldInputProps) {
     );
   }
 
+  if (field.type === "array") {
+    const textValue = Array.isArray(value) ? value.join(", ") : value != null ? String(value) : "";
+    return (
+      <div>
+        <label className="text-sm font-medium">{label}</label>
+        {description && <p className="text-xs text-muted-foreground">{description}</p>}
+        <input
+          type="text"
+          value={textValue}
+          onChange={(e) => {
+            const parts = e.target.value
+              .split(",")
+              .map((part) => part.trim())
+              .filter(Boolean);
+            if (field.items?.type === "integer" || field.items?.type === "number") {
+              onChange(parts.map((part) => Number(part)).filter((part) => Number.isFinite(part)));
+            } else {
+              onChange(parts);
+            }
+          }}
+          placeholder="用逗号分隔多个值"
+          className="mt-1 w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm"
+        />
+      </div>
+    );
+  }
+
   // 默认：string 类型
   return (
     <div>
       <label className="text-sm font-medium">{label}</label>
-      {field.description && <p className="text-xs text-muted-foreground">{field.description}</p>}
+      {description && <p className="text-xs text-muted-foreground">{description}</p>}
       <input
         type="text"
         value={value != null ? String(value) : ""}

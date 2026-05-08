@@ -65,12 +65,14 @@ class ForwardPlugin(Plugin):
             include_media = cfg.get("include_media", True)
             if not include_media and event.message and event.message.media:
                 continue
-            # 3) target_chat_id：缺失 / 非法时默认转发到当前 chat
+            # 3) target_chat_id：缺失 / 非法时跳过，避免误转回当前 chat
             target_raw = cfg.get("target_chat_id")
             try:
                 target = int(target_raw)
             except (TypeError, ValueError):
-                target = event.chat_id
+                if ctx.log is not None:
+                    await ctx.log("warn", "[forward] 缺少 target_chat_id，跳过", rule_id=rule.id)
+                continue
 
             # 4) 真正发送 + FloodWait 自动重试一次
             try:

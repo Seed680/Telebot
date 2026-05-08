@@ -78,6 +78,12 @@ import { actionHint, actionLabel } from "@/lib/rate-actions";
 import type { ConfigSchema } from "@/components/plugin/ConfigDialog";
 
 // 功能列表从 feature-matrix API 动态获取，不再硬编码
+const FEATURE_CONFIG_PAGE_KEYS = new Set(["auto_reply", "forward", "scheduler", "game24"]);
+
+function featureConfigPath(aid: number, key: string): string | null {
+  if (!aid || !FEATURE_CONFIG_PAGE_KEYS.has(key)) return null;
+  return `/accounts/${aid}/features/${key}`;
+}
 
 export function AccountDetail() {
   const params = useParams();
@@ -420,6 +426,11 @@ export function AccountDetail() {
                               size="sm"
                               variant="outline"
                               onClick={() => {
+                                const path = featureConfigPath(aid, f.key);
+                                if (path) {
+                                  nav(path);
+                                  return;
+                                }
                                 // 打开配置弹窗时同时获取 global config
                                 getPluginGlobalConfig(f.key)
                                   .then((gc) => {

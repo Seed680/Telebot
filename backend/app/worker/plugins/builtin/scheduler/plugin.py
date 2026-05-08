@@ -243,13 +243,21 @@ class SchedulerPlugin(Plugin):
 
         try:
             await ctx.client.send_message(peer, text)
-        except FloodWaitError as exc:
+        except Exception as exc:
+            if not isinstance(exc, FloodWaitError) and not hasattr(exc, "seconds"):
+                raise
             # FloodWaitError 参数匹配修复：
             # engine.on_flood_wait(action, exc) 只接受 2 个参数，
             # 不需要传 peer_id（该参数已在 engine 内部通过 action 区分）
             await ctx.engine.on_flood_wait("send_message_group", exc)
             await asyncio.sleep(min(int(getattr(exc, "seconds", 0) or 0), 60))
-            await ctx.client.send_message(peer, text)
+            try:
+                await ctx.client.send_message(peer, text)
+            except Exception as retry_exc:
+                if not isinstance(retry_exc, FloodWaitError) and not hasattr(retry_exc, "seconds"):
+                    raise
+                if ctx.log is not None:
+                    await ctx.log("warn", "[scheduler] send_message still flood-waited after retry; drop once")
 
 
 PLUGIN_CLASS = SchedulerPlugin

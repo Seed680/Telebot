@@ -1,7 +1,7 @@
 """远程 Git 仓库插件管理服务（阶段 D：tpm-style 远程插件）。
 
 职责：
-- ``install``：``git clone`` 到 ``plugins/installed/<name>/`` → 解析 ``plugin.json`` → 写 ``remote_plugin`` 表 → 触发 worker 热加载（``reload_plugin``）
+- ``install``：``git clone`` 到 ``plugins/installed/<name>/`` → 解析 ``plugin.json`` → 写 ``remote_plugin`` 表 → 触发 worker 热加载（``reload_config``）
 - ``uninstall``：删 DB 行 + 删插件目录
 - ``enable`` / ``disable``：翻转 ``enabled`` 标志，并向 worker 广播热加载
 - ``update``：``git pull`` → 重读 plugin.json → 写新版本号 → 触发热加载
@@ -14,9 +14,8 @@
 
 设计要点：
 - 与现有 ``loader.py`` 集成靠两条路：
-  1. 直接 ``import`` 现有 ``reload_plugin`` 函数（同进程调用）
-  2. 通过 Redis IPC ``CMD_RELOAD_PLUGIN`` 广播到所有 worker 进程
-- 不修改现有 ``loader.py`` / ``base.py`` / 内置插件文件
+  1. 直接 ``import`` 现有 ``reload_account_config`` 函数（同进程调用）
+  2. 通过 Redis IPC ``CMD_RELOAD_CONFIG`` 广播到所有 worker 进程
 - 不依赖 GitPython，统一走 ``asyncio`` 子进程跑 ``git``，只需要环境里有 ``git`` 即可
 - 名字（``name``）三重身份：DB 唯一键 / 文件目录名 / loader 注册的 plugin key
 """
@@ -28,11 +27,11 @@ import json
 import logging
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,10 +39,10 @@ from ..db.models.account import Account
 from ..db.models.feature import AccountFeature, Feature
 from ..db.models.remote_plugin import RemotePlugin
 from ..settings import settings
-from ..worker.ipc import CMD_RELOAD_PLUGIN, cmd_channel, make_cmd
+from ..worker.ipc import CMD_RELOAD_CONFIG, cmd_channel, make_cmd
 
-# 直接复用现有 loader 的 reload_plugin —— 不修改 loader.py，仅 import 调用
-from ..worker.plugins.loader import reload_plugin
+# 直接复用现有 loader 的配置热更新路径；installed 插件在 loader 里按 DB 双开关按需加载
+from ..worker.plugins.loader import reload_account_config
 
 log = logging.getLogger(__name__)
 
@@ -107,7 +106,7 @@ class PluginMetadataSchema(BaseModel):
     # entry 是可选的，默认为 plugin.py
     entry: str = "plugin.py"
     # permissions 和 config_schema 是可选扩展字段
-    permissions: list[str] = []
+    permissions: list[str] = field(default_factory=list)
     config_schema: dict[str, Any] | None = None
 
     @field_validator("name", "key")
@@ -143,6 +142,12 @@ class PluginMetadataSchema(BaseModel):
             raise ValueError("author 字段过长（最大 255 字符）")
         return v
 
+    @model_validator(mode="after")
+    def _fill_name_from_key(self) -> "PluginMetadataSchema":
+        if self.name is None and self.key is not None:
+            self.name = self.key
+        return self
+
 
 @dataclass
 class PluginMetadata:
@@ -154,7 +159,7 @@ class PluginMetadata:
     author: str = ""
     version: str = "0.0.0"
     entry: str = "plugin.py"
-    permissions: list[str] = []
+    permissions: list[str] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────
@@ -200,15 +205,12 @@ def _validate_source_url(url: str) -> None:
 
     url = url.strip()
 
-    # 处理 git+ssh:// 格式（去掉 git+ 前缀取真实 scheme）
-    check_url = url
-    if check_url.startswith("git+ssh://"):
-        check_url = "ssh://" + check_url[9:]
-
     # 解析 scheme
-    if "://" in check_url:
-        scheme = check_url.split("://", 1)[0].lower()
-    elif ":" in check_url and "@" in check_url:
+    if url.startswith("git+ssh://"):
+        scheme = "git+ssh"
+    elif "://" in url:
+        scheme = url.split("://", 1)[0].lower()
+    elif ":" in url and "@" in url:
         # scp-like 格式 git@github.com:foo/bar
         scheme = "ssh"
     else:
@@ -366,8 +368,8 @@ async def _trigger_reload(db: AsyncSession, name: str) -> None:
     """通知 worker 重新加载该插件。
 
     两条路径并行：
-    - 通过 Redis IPC ``CMD_RELOAD_PLUGIN`` 广播到所有账号 worker
-    - 直接调本进程的 ``reload_plugin``（在 worker 进程内才会有效，主进程为 no-op）
+    - 通过 Redis IPC ``CMD_RELOAD_CONFIG`` 广播到所有账号 worker
+    - 直接调本进程的 ``reload_account_config``（在 worker 进程内才会有效，主进程为 no-op）
 
     任何环节失败都吞掉——热加载失败不应阻塞 install/update 这条主流程；
     DB 已经写好，下次 worker 启动时也会自动扫描到新插件。
@@ -388,19 +390,19 @@ async def _trigger_reload(db: AsyncSession, name: str) -> None:
             try:
                 await redis.publish(
                     cmd_channel(aid),
-                    make_cmd(CMD_RELOAD_PLUGIN, plugin_key=name),
+                    make_cmd(CMD_RELOAD_CONFIG, plugin_key=name),
                 )
             except Exception:  # noqa: BLE001
-                log.debug("redis 广播 reload_plugin 失败 aid=%s", aid, exc_info=True)
+                log.debug("redis 广播 reload_config 失败 aid=%s", aid, exc_info=True)
     except Exception:  # noqa: BLE001
         log.debug("redis 不可用，跳过 IPC 广播", exc_info=True)
 
     # 2) 进程内直接调用（worker 进程才有效；主进程内 _STATES 为空，函数会早返回）
     for aid in aids:
         try:
-            await reload_plugin(aid, name)
+            await reload_account_config(aid, {"plugin_key": name})
         except Exception:  # noqa: BLE001
-            log.debug("inproc reload_plugin 失败 aid=%s name=%s", aid, name, exc_info=True)
+            log.debug("inproc reload_config 失败 aid=%s name=%s", aid, name, exc_info=True)
 
 
 # ─────────────────────────────────────────────────────
@@ -429,7 +431,7 @@ async def install(
       6. 写 ``remote_plugin`` 行
       7. 注册到 ``feature`` 表（is_builtin=False），使功能矩阵可见
       8. 若 ``default_enabled=True``，为所有已有账号创建 ``AccountFeature`` 行
-      9. 触发 ``reload_plugin`` 广播
+      9. 触发 ``reload_config`` 广播
 
     任何中间步骤失败：已克隆的目录会被清理；DB 不会留下脏行（由调用方
     在事务里 commit / rollback 即可，本函数只 ``flush``）。

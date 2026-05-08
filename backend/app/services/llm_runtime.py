@@ -18,11 +18,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+import inspect
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 if TYPE_CHECKING:
     from .llm_client import LLMClient, LLMResult
     from .llm_dto import LLMProviderDTO
+
+from .llm_client import build_client_from_dto
 
 log = logging.getLogger(__name__)
 
@@ -199,11 +202,7 @@ async def call_with_fallback(
     Raises:
         LLMCallFailed: 所有 provider 都失败时抛出
     """
-    from .llm_client import (
-        LLMCallFailed,
-        LLMError,
-        build_client_from_dto,
-    )
+    from .llm_client import LLMCallFailed
 
     all_providers = chain.all_providers
     tried_providers: list[str] = []
@@ -269,12 +268,7 @@ async def call_with_fallback(
                 retryable,
             )
 
-            # 如果不可 fallback 且非最后一个 provider，记录错误并继续
-            if not retryable and not is_fallback and idx < len(all_providers) - 1:
-                log.info("[llm-runtime] 不可重试错误，尝试 fallback")
-                continue
-
-            # 如果是最后一个 provider 或不可 fallback，抛出
+            # 认证/配置类错误不应 fallback，否则会把不可恢复配置错误伪装成线路问题。
             if idx == len(all_providers) - 1 or not retryable:
                 # 记录失败 usage
                 usage_record = UsageRecord(
@@ -319,10 +313,7 @@ async def _call_with_retry(
     import time
 
     from .llm_client import (
-        LLMCallFailed,
         LLMError,
-        build_client_from_dto,
-        _is_retryable_error,
     )
 
     last_error: Exception | None = None
@@ -336,6 +327,8 @@ async def _call_with_retry(
                 provider_dto,
                 override_model=override_model,
             )
+            if inspect.isawaitable(client):
+                client = await client
             result = await client.complete(
                 system,
                 user,

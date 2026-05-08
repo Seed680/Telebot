@@ -12,7 +12,7 @@
    - 实例化该账号当前 RemotePlugin.enabled=True AND AccountFeature.enabled=True 的所有插件，并把状态写回为 active
 2. 主进程通过 IPC ``CMD_RELOAD_CONFIG`` 触发 ``reload_account_config`` 实现热更新（拉新 rules / config，
    并对新增 / 移除的 feature 做差量加载与卸载）
-3. ``CMD_RELOAD_PLUGIN`` 调 ``reload_plugin``：``importlib.reload`` 单个内置插件模块并重新激活
+3. ``CMD_RELOAD_PLUGIN`` 调 ``reload_plugin``：builtin 走 ``importlib.reload``，installed 走按需重载
 
 模块化后插件以"目录"形式存在：
 - 内置：``backend/app/worker/plugins/builtin/<key>/{__init__.py, manifest.py, plugin.py}``
@@ -30,6 +30,7 @@ import collections
 import importlib
 import importlib.util
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -114,11 +115,29 @@ def _import_builtins() -> None:
     except Exception:  # noqa: BLE001
         log.exception("import plugins.builtin 失败")
     try:
-        # discover_plugins 同时扫描 builtin + installed，并把 _manifest / _source
-        # 挂到 plugin 类上；这里只关心其副作用。
+        # 只扫描 builtin。第三方 installed 插件必须等 DB 双开关检查通过后
+        # 再按需加载，避免 worker 启动/配置刷新时执行未启用插件代码。
         discover_plugins()
     except Exception:  # noqa: BLE001
         log.exception("discover_plugins 失败")
+
+
+def _installed_module_name(plugin_key: str) -> str:
+    return f"_telebot_installed_plugin_{plugin_key}"
+
+
+def _clear_installed_module_cache(plugin_key: str) -> None:
+    """清掉第三方插件包及其子模块缓存，保证热加载读到磁盘最新代码。"""
+    import sys as _sys
+
+    mod_name = _installed_module_name(plugin_key)
+    for name in list(_sys.modules):
+        if name == mod_name or name.startswith(f"{mod_name}."):
+            _sys.modules.pop(name, None)
+
+
+def _is_safe_plugin_key(plugin_key: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_.-]+", plugin_key or ""))
 
 
 def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
@@ -149,7 +168,8 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
             # 这种相对 import 会找不到父包。
             import sys as _sys
 
-            mod_name = f"_telebot_installed_plugin_{path.name}"
+            mod_name = _installed_module_name(path.name)
+            _clear_installed_module_cache(path.name)
             spec = importlib.util.spec_from_file_location(
                 mod_name,
                 init_file,
@@ -194,16 +214,40 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
     return {manifest.key: cls}
 
 
-def discover_plugins() -> dict[str, type[Plugin]]:
-    """按目录扫描 builtin + installed 两个根，返回 ``{key -> Plugin 子类}``。
+def _load_installed_plugin(plugin_key: str) -> dict[str, type[Plugin]]:
+    """按 key 加载单个 installed 插件。
 
-    - 同名时 ``installed`` 覆盖 ``builtin``（第三方插件可"覆盖升级"内置实现）。
+    调用方必须先完成 DB 层授权检查；此函数只负责路径约束和 import。
+    """
+    if not _is_safe_plugin_key(plugin_key):
+        log.warning("installed 插件 key 非法，拒绝加载: %r", plugin_key)
+        return {}
+
+    root = _installed_dir().resolve()
+    path = (root / plugin_key).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        log.warning("installed 插件路径越界，拒绝加载: %s", path)
+        return {}
+    if not path.is_dir():
+        return {}
+    return _load_dir(path, source="installed")
+
+
+def discover_plugins(*, include_installed: bool = False) -> dict[str, type[Plugin]]:
+    """按目录扫描插件根，返回 ``{key -> Plugin 子类}``。
+
+    - 默认只扫描 builtin，避免无条件执行 installed 插件代码。
+    - ``include_installed=True`` 仅保留给受控测试/迁移脚本；运行路径不要使用。
     - 单个插件失败只记日志，不影响其它插件。
     - 不存在 ``plugins/installed`` 目录时直接跳过该源。
     """
     out: dict[str, type[Plugin]] = {}
     for sub in _scan_builtin_dirs():
         out.update(_load_dir(sub, source="builtin"))
+    if not include_installed:
+        return out
     installed_dir = _installed_dir()
     if installed_dir.exists():
         for sub in sorted(installed_dir.iterdir(), key=lambda p: p.name):
@@ -349,8 +393,8 @@ async def load_plugins_for_account(
 
         return _dispatch
 
-    _make_dispatcher("incoming")
     _make_dispatcher("outgoing")
+    _make_dispatcher("incoming")
 
     # ── 3) 加载该账号所有已启用 feature ──
     async with AsyncSessionLocal() as db:
@@ -384,6 +428,32 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         redis: Redis 客户端
     """
     cls = get_plugin(af.feature_key)
+    if cls is None:
+        rp = (
+            await db.execute(
+                select(RemotePlugin).where(RemotePlugin.name == af.feature_key)
+            )
+        ).scalar_one_or_none()
+        if rp is not None:
+            if not rp.enabled:
+                await _log(
+                    redis,
+                    state.account_id,
+                    "info",
+                    f"feature {af.feature_key} 的 RemotePlugin.enabled=False，跳过加载",
+                )
+                await db.execute(
+                    update(AccountFeature)
+                    .where(
+                        AccountFeature.account_id == state.account_id,
+                        AccountFeature.feature_key == af.feature_key,
+                    )
+                    .values(state=FEATURE_STATE_DISABLED)
+                )
+                await db.commit()
+                return
+            _load_installed_plugin(af.feature_key)
+            cls = get_plugin(af.feature_key)
     if cls is None:
         await _log(
             redis,
@@ -463,8 +533,8 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         config=dict(af.config or {}),
         rules=list(rules),
         client=plugin_client,
-        engine=state.engine,
-        redis=state.redis or redis,
+        engine=state.engine if plugin_source != "installed" else None,
+        redis=(state.redis or redis) if plugin_source != "installed" else None,
         log=_make_logger(redis, state.account_id),
         generation=state.generation,
     )
@@ -592,7 +662,8 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
     """收到 IPC ``reload_config`` 时调用：
 
     - **先刷新 BUILTIN_FEATURES**：动态重扫 builtin 目录，让新增插件立即可见
-    - **再重新扫描插件目录**：``discover_plugins()`` 把新发现的插件类注册进 ``_REGISTRY``
+    - **再重新扫描 builtin 目录**：``discover_plugins()`` 把新发现的内置插件类注册进 ``_REGISTRY``
+      第三方插件只在 RemotePlugin.enabled + AccountFeature.enabled 双开关通过后按需加载
     - 已实例化的 feature：刷新 ``ctx.config`` / ``ctx.rules``；若该 feature 已被禁用则 shutdown
     - 数据库新增的 enabled feature：调 ``_activate`` 加载
 
@@ -611,11 +682,18 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
     except Exception:  # noqa: BLE001
         log.exception("reload_account_config 时刷新 BUILTIN_FEATURES 失败")
 
-    # 阶段 B：先扫描一次目录，把新装的第三方插件注册进来；存量 builtin 走 import 缓存几乎零开销
+    # 仅刷新 builtin。installed 插件在 _activate 里按需加载，不能在这里无条件执行。
     try:
         discover_plugins()
     except Exception:  # noqa: BLE001
         log.exception("reload_account_config 时 discover_plugins 失败")
+
+    reload_plugin_key = None
+    if isinstance(payload, dict):
+        raw_key = payload.get("plugin_key")
+        if isinstance(raw_key, str) and raw_key:
+            reload_plugin_key = raw_key
+            _clear_installed_module_cache(raw_key)
 
     async with AsyncSessionLocal() as db:
         # 1) 现有实例：刷新或卸载
@@ -628,13 +706,24 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
                     )
                 )
             ).scalar_one_or_none()
-            if af is None or not af.enabled:
+            cls = get_plugin(fkey)
+            plugin_source = getattr(cls, "_source", "builtin") if cls is not None else "builtin"
+            remote_disabled = False
+            if plugin_source == "installed":
+                rp = (
+                    await db.execute(
+                        select(RemotePlugin).where(RemotePlugin.name == fkey)
+                    )
+                ).scalar_one_or_none()
+                remote_disabled = rp is None or not rp.enabled
+
+            force_reload = reload_plugin_key == fkey
+            if af is None or not af.enabled or remote_disabled or force_reload:
                 ctx = state.contexts.get(fkey)
                 inst = state.instances.get(fkey)
 
                 # ── 安全：先注销该插件的所有命令 ──
                 if inst is not None:
-                    cls = get_plugin(fkey)
                     if cls is not None:
                         cmds = getattr(inst, "commands", None) or cls.commands or {}
                         for cname in cmds.keys():
@@ -649,16 +738,17 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
 
                 state.instances.pop(fkey, None)
                 state.contexts.pop(fkey, None)
-                # 同时写状态为 disabled，便于前端展示
-                await db.execute(
-                    update(AccountFeature)
-                    .where(
-                        AccountFeature.account_id == account_id,
-                        AccountFeature.feature_key == fkey,
+                if af is not None and (not af.enabled or remote_disabled):
+                    # 同时写状态为 disabled，便于前端展示
+                    await db.execute(
+                        update(AccountFeature)
+                        .where(
+                            AccountFeature.account_id == account_id,
+                            AccountFeature.feature_key == fkey,
+                        )
+                        .values(state=FEATURE_STATE_DISABLED)
                     )
-                    .values(state=FEATURE_STATE_DISABLED)
-                )
-                await db.commit()
+                    await db.commit()
                 continue
             # 仍启用：刷新 rules + config
             rules = (
@@ -698,9 +788,10 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
 # 单插件热重载：reload_plugin
 # ─────────────────────────────────────────────────────
 async def reload_plugin(account_id: int, plugin_key: str | None) -> None:
-    """``importlib.reload`` 一个内置插件模块，并重新激活。
+    """热重载单个插件并重新激活。
 
-    仅支持内置插件；第三方插件目前不在 MVP 范围。
+    builtin 走 importlib.reload；installed 先清模块缓存，再让 _activate 在 DB 双开关
+    通过后重新加载。
     """
     if not plugin_key:
         return
@@ -728,30 +819,30 @@ async def reload_plugin(account_id: int, plugin_key: str | None) -> None:
         state.instances.pop(plugin_key, None)
         state.contexts.pop(plugin_key, None)
 
-    # 2) reload 模块（仅内置）
+    # 2) reload 模块
     if plugin_key not in _BUILTIN_MODULES:
-        await _log(redis, account_id, "warn", f"reload_plugin 仅支持内置插件: {plugin_key}")
-        return
-    try:
-        # 模块化后每个 builtin 插件是子包：``manifest.py`` + ``plugin.py`` + ``__init__.py``。
-        # 按"manifest → plugin → 子包入口"顺序 reload，确保 @register 重新触发，
-        # MANIFEST / PLUGIN_CLASS 取到最新版本。
-        for sub in ("manifest", "plugin"):
-            try:
-                m = importlib.import_module(
-                    f".builtin.{plugin_key}.{sub}", package=__package__
-                )
-                importlib.reload(m)
-            except ModuleNotFoundError:
-                # 旧式单文件 builtin（理论上重构后已不存在），忽略
-                pass
-        pkg_mod = importlib.import_module(
-            f".builtin.{plugin_key}", package=__package__
-        )
-        importlib.reload(pkg_mod)
-    except Exception as exc:  # noqa: BLE001
-        await _log(redis, account_id, "error", f"reload {plugin_key} 失败: {exc}")
-        return
+        _clear_installed_module_cache(plugin_key)
+    else:
+        try:
+            # 模块化后每个 builtin 插件是子包：``manifest.py`` + ``plugin.py`` + ``__init__.py``。
+            # 按"manifest → plugin → 子包入口"顺序 reload，确保 @register 重新触发，
+            # MANIFEST / PLUGIN_CLASS 取到最新版本。
+            for sub in ("manifest", "plugin"):
+                try:
+                    m = importlib.import_module(
+                        f".builtin.{plugin_key}.{sub}", package=__package__
+                    )
+                    importlib.reload(m)
+                except ModuleNotFoundError:
+                    # 旧式单文件 builtin（理论上重构后已不存在），忽略
+                    pass
+            pkg_mod = importlib.import_module(
+                f".builtin.{plugin_key}", package=__package__
+            )
+            importlib.reload(pkg_mod)
+        except Exception as exc:  # noqa: BLE001
+            await _log(redis, account_id, "error", f"reload {plugin_key} 失败: {exc}")
+            return
 
     # 3) 重新激活
     async with AsyncSessionLocal() as db:

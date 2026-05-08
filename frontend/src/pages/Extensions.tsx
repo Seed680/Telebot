@@ -81,6 +81,18 @@ import type { ConfigSchema } from "@/components/plugin/ConfigDialog";
 type TabValue = "accounts" | "plugins" | "guide";
 const PLUGINS_QK = ["installed-packages"] as const;
 const REMOTE_QK = ["remote-plugins"] as const;
+const FEATURE_CONFIG_PAGE_KEYS = new Set(["auto_reply", "forward", "scheduler", "game24"]);
+
+function featureConfigPath(aid: number | null | undefined, key: string): string | null {
+  if (!aid || !FEATURE_CONFIG_PAGE_KEYS.has(key)) return null;
+  return `/accounts/${aid}/features/${key}`;
+}
+
+function formatPluginVersion(version?: string | null) {
+  const v = (version || "").trim();
+  if (!v) return "-";
+  return v.startsWith("v") ? v : `v${v}`;
+}
 
 // ── 顶层组件 ──────────────────────────────────────────────────────
 export function Extensions() {
@@ -112,7 +124,7 @@ export function Extensions() {
           <AccountPluginsTab />
         </TabsContent>
         <TabsContent value="plugins">
-          <PluginsManagementTab />
+          <PluginsManagementTab onManageAccounts={() => setTab("accounts")} />
         </TabsContent>
         <TabsContent value="guide">
           <DevGuideTab />
@@ -280,6 +292,11 @@ function AccountPluginsTab() {
                             variant="outline"
                             className="h-9 px-3"
                             onClick={() => {
+                              const path = featureConfigPath(selectedAccount.id, f.key);
+                              if (path) {
+                                nav(path);
+                                return;
+                              }
                               getPluginGlobalConfig(f.key)
                                 .then((gc) => {
                                   setConfigDialog({
@@ -365,11 +382,11 @@ function AccountPluginsTab() {
 // ═══════════════════════════════════════════════════════════════════
 // Tab 2：插件管理 — 内置插件 + 远程插件统一展示
 // ═══════════════════════════════════════════════════════════════════
-function PluginsManagementTab() {
+function PluginsManagementTab({ onManageAccounts }: { onManageAccounts: () => void }) {
   return (
     <div className="space-y-4">
       <RemoteInstallCard />
-      <InstalledPluginsSection />
+      <InstalledPluginsSection onManageAccounts={onManageAccounts} />
     </div>
   );
 }
@@ -395,7 +412,7 @@ function RemoteInstallCard() {
       <CardHeader className="pb-3">
         <CardTitle className="text-base">从 Git 仓库安装</CardTitle>
         <CardDescription>
-          支持 GitHub / GitLab 等公开仓库，仓库根目录需含 <code>plugin.json</code> 或 <code>manifest.py</code>
+          支持 GitHub / GitLab 等公开仓库，仓库根目录需含静态 <code>plugin.json</code>
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -428,7 +445,7 @@ function RemoteInstallCard() {
 }
 
 // ── 已安装插件列表（内置 + 远程） ────────────────────────────────
-function InstalledPluginsSection() {
+function InstalledPluginsSection({ onManageAccounts }: { onManageAccounts: () => void }) {
   const qc = useQueryClient();
 
   const builtinQ = useQuery({
@@ -515,9 +532,13 @@ function InstalledPluginsSection() {
                     <div className="font-mono text-xs text-muted-foreground">{f.key}</div>
                   </TableCell>
                   <TableCell><Badge variant="secondary">内置</Badge></TableCell>
-                  <TableCell>—</TableCell>
+                  <TableCell>{formatPluginVersion(f.version)}</TableCell>
                   <TableCell><Badge variant="default">内置</Badge></TableCell>
-                  <TableCell className="text-right">—</TableCell>
+                  <TableCell className="text-right">
+                    <Button size="sm" variant="outline" onClick={onManageAccounts}>
+                      按账号管理
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))}
               {/* 第三方插件 */}
@@ -527,7 +548,7 @@ function InstalledPluginsSection() {
                     <div className="font-medium">{row.key}</div>
                   </TableCell>
                   <TableCell><Badge variant="outline">第三方</Badge></TableCell>
-                  <TableCell>{row.version}</TableCell>
+                  <TableCell>{formatPluginVersion(row.version)}</TableCell>
                   <TableCell>
                     <Badge variant={row.enabled ? "default" : "outline"}>
                       {row.enabled ? "已启用" : "未启用"}
@@ -553,7 +574,7 @@ function InstalledPluginsSection() {
                     <div className="font-mono text-xs text-muted-foreground">{p.name}</div>
                   </TableCell>
                   <TableCell><Badge variant="outline"><GitFork className="inline h-3 w-3 mr-1" />远程</Badge></TableCell>
-                  <TableCell>v{p.version}</TableCell>
+                  <TableCell>{formatPluginVersion(p.version)}</TableCell>
                   <TableCell>
                     <Badge variant={p.enabled ? "default" : "outline"}>
                       {p.enabled ? "已启用" : "未启用"}

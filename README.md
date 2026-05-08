@@ -5,7 +5,7 @@
 <!-- [![CI](https://github.com/Anoyou/telebot/workflows/CI/badge.svg)](https://github.com/Anoyou/telebot/actions) -->
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## 纯纯用白嫖的 Claude Opus 4.7 Vibe 出来的，想到什么做什么。很多地方还不完善。
+## 个人玩具，纯纯用白嫖的 Claude Opus 4.7 / Codex GPT 5.5 等 AI Vibe 出来的，想到什么做什么。很多地方还不完善。
 
 ## Features
 
@@ -15,8 +15,10 @@
 - ⏰ **定时任务**：cron / once / interval 三种模式，支持多账号广播
 - 🤖 **自定义命令模板**：含 AI 类型（OpenAI / Anthropic / 自建反代）
 - 🛡 **风控引擎**：18 actions × 5 policies × 拟人化 + FloodWait 自适应
-- 🔌 **插件开发框架**：不是市场——见 [docs/PLUGIN-DEV-GUIDE.md](docs/PLUGIN-DEV-GUIDE.md)
-- 📨 **多 Bot 通知通道**：项目启动 / 故障告警
+- 🔌 **插件开发框架**：支持本地和远程插件（施工中...）——见 [docs/PLUGIN-DEV-GUIDE.md](docs/PLUGIN-DEV-GUIDE.md)
+- 📨 **多 Bot 通知通道**：项目启动 / 故障告警（施工中...）
+- 持续更新中...
+
 
 ## Screenshots
 
@@ -92,9 +94,9 @@ docker compose up -d --build
 
 ## FAQ
 
-### Q: 多用户支持？
+### Q: 项目起源？多用户支持？
 
-- 单租户设计，一个超管账号；多用户不在路线图
+- 想着在实现 userbot 的各种各样自定义功能后，如果有小号可以直接在控制台中复用。所以有了该项目。
 
 ### Q: 为什么不用 Bot API 而用 userbot？
 

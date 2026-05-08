@@ -157,16 +157,18 @@ class SandboxClient:
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """阻断 raw MTProto 路径：client(functions.xxx(...))."""
+        plugin_key = object.__getattribute__(self, "_plugin_key")
         raise PermissionError(
-            f"插件 {self._plugin_key!r} 禁止调用 client.__call__ (raw MTProto)"
+            f"插件 {plugin_key!r} 禁止调用 client.__call__ (raw MTProto)"
         )
 
     def __getattribute__(self, name: str) -> Any:
         """元属性访问（__slots__ 字段走此路径）。"""
         # 危险属性直接拒绝
         if name in _BLOCKED_ATTRS or name.startswith("_"):
+            plugin_key = object.__getattribute__(self, "_plugin_key")
             raise PermissionError(
-                f"插件 {self._plugin_key!r} 禁止访问 client.{name}"
+                f"插件 {plugin_key!r} 禁止访问 client.{name}"
             )
         return super().__getattribute__(name)
 
@@ -181,25 +183,31 @@ class SandboxClient:
         5. 其它 → 拒绝
         """
         # 黑名单二次检查（即使上面 __getattribute__ 已经处理，这里作为纵深防御）
+        plugin_key = object.__getattribute__(self, "_plugin_key")
         if name in _BLOCKED_ATTRS:
             raise PermissionError(
-                f"插件 {self._plugin_key!r} 禁止访问 client.{name}"
+                f"插件 {plugin_key!r} 禁止访问 client.{name}"
             )
         # 私有属性
         if name.startswith("_"):
             raise PermissionError(
-                f"插件 {self._plugin_key!r} 禁止访问私有属性 client.{name}"
+                f"插件 {plugin_key!r} 禁止访问私有属性 client.{name}"
             )
-        if name in _ALWAYS_ALLOWED or name in self._allowed:
-            return getattr(self._real, name)
+        allowed = object.__getattribute__(self, "_allowed")
+        if name in _ALWAYS_ALLOWED or name in allowed:
+            real = object.__getattribute__(self, "_real")
+            return getattr(real, name)
         # 不在允许集内 → 抛 PermissionError
+        perms = object.__getattribute__(self, "_perms")
         raise PermissionError(
-            f"插件 {self._plugin_key!r} 缺少权限调用 client.{name}; "
-            f"请在 manifest.permissions 中声明对应能力（持有: {self._perms}）"
+            f"插件 {plugin_key!r} 缺少权限调用 client.{name}; "
+            f"请在 manifest.permissions 中声明对应能力（持有: {perms}）"
         )
 
     def __repr__(self) -> str:  # pragma: no cover - 调试用
-        return f"<SandboxClient plugin={self._plugin_key} perms={self._perms}>"
+        plugin_key = object.__getattribute__(self, "_plugin_key")
+        perms = object.__getattribute__(self, "_perms")
+        return f"<SandboxClient plugin={plugin_key} perms={perms}>"
 
 
 __all__ = ["ALLOWED_API", "SandboxClient", "resolve_permissions"]

@@ -153,8 +153,11 @@ def _safe_log_text(text: str, max_len: int = 200) -> str:
     """
     if not text:
         return "<empty>"
+    if not isinstance(text, str):
+        text = str(text)
     length = len(text)
-    preview = text[:max_len] if len(text) > max_len else text
+    preview_len = max(0, max_len - 1) if len(text) > max_len else max_len
+    preview = text[:preview_len] if len(text) > max_len else text
     # 对预览做简单脱敏（去掉可能的 token）
     import re
     preview = re.sub(r"sk-[A-Za-z0-9_-]{4,}", "<sk>", preview)
@@ -914,20 +917,17 @@ def unregister_plugin_command(name: str, *, owner_plugin_key: str | None = None)
         name: 命令名
         owner_plugin_key: 如果指定，只注销该插件的命令
     """
-    if name in _BUILTIN:
-        cmd = _BUILTIN[name]
-        # 内置命令不能被注销
+    if name not in _PLUGIN_COMMANDS:
+        # 内置命令不在插件命令表中，不能被注销。
         return
 
     # 从插件命令表中注销
-    if name in _PLUGIN_COMMANDS:
-        pcmd = _PLUGIN_COMMANDS[name]
-        if owner_plugin_key is None or pcmd.owner_plugin_key == owner_plugin_key:
-            _PLUGIN_COMMANDS.pop(name, None)
-            # 如果命令也被添加到 _BUILTIN（通过 register_plugin_command），也移除
-            _BUILTIN.pop(name, None)
-            # 更新别名映射
-            _BUILTIN_ALIAS_TO_PRIMARY.pop(name, None)
+    pcmd = _PLUGIN_COMMANDS[name]
+    if owner_plugin_key is None or pcmd.owner_plugin_key == owner_plugin_key:
+        _PLUGIN_COMMANDS.pop(name, None)
+        # 插件命令复用 _BUILTIN 分发表；注销时必须一起移除。
+        _BUILTIN.pop(name, None)
+        _register_builtin_aliases()
 
 
 def unregister_all_plugin_commands(*, owner_plugin_key: str):
@@ -1266,8 +1266,8 @@ async def _run_ai(client, event, args, tpl: dict[str, Any], account_id: int) -> 
             provider_dict = _ctx.providers.get(chosen_provider_id)
         except Exception as e:  # noqa: BLE001
             log.exception("[ai] provider miss 时刷新失败 account=%s pid=%s", _ctx.account_id, chosen_provider_id)
-            await event.edit(f"✗ provider 刷新失败：{type(e).__name__}: {e}")
-            return
+            # 刷新失败时继续走"provider 不存在"的友好提示；不要把 DB/网络错误
+            # 覆盖掉用户真正需要看到的 provider_id。
 
     if provider_dict is None:
         await event.edit(

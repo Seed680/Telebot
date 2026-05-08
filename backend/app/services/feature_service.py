@@ -407,6 +407,10 @@ def validate_config_against_schema(
         errors: list[ConfigValidationError] = []
         for error in validator.iter_errors(config):
             path = ".".join(str(p) for p in error.path) if error.path else "root"
+            if error.validator == "required" and error.validator_value:
+                missing = [k for k in error.validator_value if isinstance(k, str) and k not in config]
+                if missing:
+                    path = missing[0]
             errors.append(ConfigValidationError(
                 field=path,
                 message=error.message,
