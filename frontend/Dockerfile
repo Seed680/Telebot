@@ -29,4 +29,4 @@ COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80
 
 # 健康检查：能拿到首页即可
-HEALTHCHECK --interval=10s --timeout=3s CMD wget -qO- http://localhost/ >/dev/null 2>&1 || exit 1
+HEALTHCHECK --interval=10s --timeout=3s CMD wget -qO- http://127.0.0.1/ >/dev/null 2>&1 || exit 1
