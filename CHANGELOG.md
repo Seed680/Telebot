@@ -10,6 +10,49 @@
 
 ---
 
+## [0.10.1] — 2026-05-11 · feature · 插件仓库系统 + 调度平台化 + Codex 生图增强
+
+### Added
+- **插件仓库系统**：新增后端 `plugin_repo` 表与完整 CRUD API，支持添加 Git 仓库、浏览仓库内插件、选择性安装。
+  - 仓库地址持久化存储在数据库，跟随系统配置，不依赖浏览器 localStorage。
+  - 自动扫描仓库根目录或一级子目录的 `plugin.json`，识别单插件/多插件仓库。
+  - 前端 Extensions 页面「插件仓库」卡片：添加仓库 → 展开浏览 → 点击安装，已安装插件标记状态。
+- **调度平台化**：定时任务从普通插件语义收口为平台基础能力。
+  - 新增 `scheduler_runtime.py` 平台调度器模块，提供 `PlatformScheduler` 与 `SchedulerFacade`。
+  - `PluginContext` 新增 `ctx.scheduler` capability，插件可注册/注销定时任务。
+  - 新增系统级路由 `/scheduler`（调度中心）与侧边栏「调度」一级菜单，支持账号选择器。
+  - 插件中心与账号详情中的「基础能力→配置」统一跳转调度中心，形成单真相双入口。
+- Codex 生图插件新增 `image_model` 配置项，支持选择底层图片模型（auto / gpt-image-2 / gpt-image-1.5 / gpt-image-1 / gpt-image-1-mini）。
+- Codex 生图消息模板新增 `{image_model}` 占位符，主模型与图片模型分开展示。
+- Codex 生图 `aspect_ratio` 和 `image_size` 新增 `from_reference` 选项，回复图片生成时自动使用原图比例和分辨率。
+- 前端 Codex 配置页同步新增图片模型下拉选择器。
+- `system_health` 进程采样改为优先 psutil，失败回退 ps，提升 Oracle/Linux 环境稳定性。
+
+### Changed
+- 调度器兼容壳（builtin scheduler plugin）移除自建 tick loop，只保留兼容注册与方法表。
+- Codex 生图错误提示全面白话化：
+  - 401/403 鉴权失败：区分 Token 过期、无效、权限不足，附带修复建议。
+  - 429 限流：说明原因和等待策略。
+  - 额度用完：显示计划类型和恢复时间。
+  - 内容审核拦截、超时、余额不足等常见错误均有 ❌ + 💡 结构化提示。
+- Codex 生图轮询状态展示优化：显示 API 返回的实际状态（in_progress / queued 等），不再只显示"正在等待"。
+- 参考图比例匹配容差从 ±0.02 放宽到 ±0.05，减少因图片压缩导致的比例误判。
+- PWA 移动端 Tabs 自动换行居中，Card/Content 增加 min-w-0 防止长内容撑破布局。
+- 插件开发指南增加平台调度器说明、`ctx.scheduler` 用法与迁移约束。
+
+### Fixed
+- 修复 `from_reference` 在无参考图时传给 API 的 "from_reference" 字符串导致请求失败的问题，现在自动 fallback 到默认值。
+- 修复 `_poll_codex_response` 吞掉 HTTP 4xx/5xx 错误的问题，现在正确提取并返回错误信息。
+- 修复轮询时 `status=failed` 等终态被忽略的问题，现在立即报错而非空等超时。
+- 修复 Extensions 页面缺少 `X` icon import 导致 CI 构建失败。
+- 修复 `system_health` 在部分 Linux 环境下 CPU/内存读取失败的问题。
+
+### Verification
+- 后端测试通过：`pytest backend/app/tests`（492 passed, 2 skipped）。
+- 前端类型检查通过：`pnpm -C frontend exec tsc -b --noEmit`。
+
+---
+
 ## [0.10.0] — 2026-05-10 · feature · 账号 Bot 联动 + 日志可观测性 + Sudo 收紧
 
 ### Added

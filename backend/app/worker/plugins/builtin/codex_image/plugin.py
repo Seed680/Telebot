@@ -157,19 +157,76 @@ def _humanize_codex_error(status_code: int, detail: str) -> str:
         plan = _safe_error_text(str(err.get("plan_type") or "unknown")) if isinstance(err, dict) else "unknown"
         resets = _format_seconds(err.get("resets_in_seconds") if isinstance(err, dict) else None)
         suffix = f"预计 {resets} 后恢复。" if resets else "请稍后再试。"
-        return f"Codex 额度已用完（当前计划：{plan}）。{suffix}\n可以更换 Access Token，或等待额度恢复。"
+        return (
+            f"❌ Codex 额度已用完（当前计划：{plan}）。{suffix}\n"
+            f"💡 这个月的免费/付费额度用光了。可以更换 Access Token，或等额度周期重置。"
+        )
 
     if status_code in {401, 403}:
-        return "Codex 鉴权失败：Access Token 无效、过期，或当前账号没有权限。请在配置页重新保存 Token。"
+        hint = ""
+        if message:
+            lowered = message.lower()
+            if "expired" in lowered or "过期" in lowered:
+                hint = "Token 已过期，需要重新登录 Codex 获取新的 Token。"
+            elif "invalid" in lowered or "无效" in lowered:
+                hint = "Token 格式不对或已失效，可能复制时少了字符。"
+            elif "permission" in lowered or "权限" in lowered:
+                hint = "当前账号没有图片生成权限，可能需要升级计划。"
+            else:
+                hint = f"Codex 说：{message}"
+        if not hint:
+            hint = "Access Token 无效、过期，或当前账号没有权限。"
+        return (
+            f"❌ Codex 鉴权失败：{hint}\n"
+            f"💡 去配置页重新保存 Token 试试，或者重新登录 Codex 拿新 Token。"
+        )
+
     if status_code == 429:
-        return "Codex 当前限流或额度不足，请稍后再试；如果频繁出现，可以更换 Token。"
+        return (
+            f"❌ Codex 请求太频繁，被限流了。\n"
+            f"💡 等几分钟再试。如果经常出现，说明当前 Token 的并发/频率配额不够，可以换个 Token。"
+        )
+
     if status_code == 404:
-        return "Codex 接口或模型不可用：请检查模型名称和接口是否仍支持。"
+        model_hint = ""
+        if message:
+            lowered = message.lower()
+            if "model" in lowered:
+                model_hint = "你配置的模型名可能写错了，或者 OpenAI 已经下线了这个模型。"
+        if not model_hint:
+            model_hint = "接口地址可能变了，或者模型名不对。"
+        return (
+            f"❌ Codex 接口或模型不可用。\n"
+            f"💡 {model_hint}检查一下配置页的模型名称和接口地址。"
+        )
+
     if status_code >= 500:
-        return "Codex 服务端暂时异常，请稍后重试。"
+        return (
+            f"❌ Codex 服务端出问题了（HTTP {status_code}）。\n"
+            f"💡 这是 OpenAI 那边的问题，不是你的锅。等几分钟再试，一般会自动恢复。"
+        )
+
     if message:
-        return f"Codex 请求失败：{message}"
-    return f"Codex 请求失败（HTTP {status_code}）：{safe_detail}"
+        # 尝试根据常见错误消息给出建议
+        lowered = message.lower()
+        if "safety" in lowered or "content_policy" in lowered or "unsafe" in lowered:
+            return (
+                f"❌ 图片被 Codex 安全审核拦截了。\n"
+                f"💡 提示词可能触发了内容安全策略，换个描述试试。"
+            )
+        if "timeout" in lowered or "timed out" in lowered:
+            return (
+                f"❌ Codex 生成超时了。\n"
+                f"💡 可能是图片太复杂或服务器繁忙，试试简化提示词，或把最大等待时间调大。"
+            )
+        if "quota" in lowered or "insufficient" in lowered:
+            return (
+                f"❌ Codex 余额不足。\n"
+                f"💡 账户没钱了或额度用完了，去 OpenAI 后台看看，或者换个有额度的 Token。"
+            )
+        return f"❌ Codex 请求失败：{message}"
+
+    return f"❌ Codex 请求失败（HTTP {status_code}）：{safe_detail}"
 
 
 def _humanize_codex_exception(exc: BaseException) -> str:
@@ -177,12 +234,21 @@ def _humanize_codex_exception(exc: BaseException) -> str:
     raw = str(exc)
     lowered = raw.lower()
     if isinstance(exc, _STREAM_RECOVERABLE_ERRORS) or "incomplete chunked read" in lowered:
-        return "Codex 流式连接中断，未能完整接收响应。已尽量自动恢复；如果仍失败，请稍后重试或换网络。"
+        return (
+            "❌ Codex 流式连接中断了，没完整收到响应。\n"
+            "💡 已尝试自动恢复。如果还是失败，可能是网络不稳定，稍后再试或换个网络。"
+        )
     if "timeout" in lowered or isinstance(exc, TimeoutError):
-        return "Codex 响应超时。请稍后重试，或把最大等待时间调大。"
+        return (
+            "❌ Codex 响应超时了。\n"
+            "💡 可能是服务器太忙或图片生成太慢。稍后再试，或者在配置页把最大等待时间调大一点。"
+        )
     if "proxy" in lowered or "connect" in lowered or "network" in lowered or "ssl" in lowered:
-        return "连接 Codex 失败。请检查网络、代理或稍后重试。"
-    return f"生成失败：{_safe_error_text(raw)}"
+        return (
+            "❌ 连接 Codex 服务器失败了。\n"
+            "💡 检查一下网络是否正常、代理配置是否正确，或者 OpenAI 服务是否在维护。"
+        )
+    return f"❌ 生成失败：{_safe_error_text(raw)}"
 
 
 def _mask_token(token: str) -> str:
@@ -234,29 +300,29 @@ def _normalize_size(value: Any, reference_size: str | None = None) -> str:
     }
     raw = str(value or "").strip().lower()
     normalized = aliases.get(raw, raw)
-    
+
     # 如果是 from_reference 且有参考图尺寸，使用参考图尺寸
-    if normalized == "from_reference" and reference_size:
-        return reference_size
-    
+    if normalized == "from_reference":
+        return reference_size if reference_size else DEFAULT_IMAGE_SIZE
+
     return _normalize_choice(normalized, SUPPORTED_IMAGE_SIZES, DEFAULT_IMAGE_SIZE)
 
 
 def _normalize_aspect_ratio(value: Any, reference_ratio: str | None = None) -> str:
     """标准化画面比例，支持 from_reference 使用参考图比例。"""
     raw = str(value or "").strip().lower().replace("：", ":")
-    
+
     # 别名处理
     aliases = {
         "原图": "from_reference",
         "参考图": "from_reference",
     }
     normalized = aliases.get(raw, raw)
-    
-    # 如果是 from_reference 且有参考图比例，使用参考图比例
-    if normalized == "from_reference" and reference_ratio:
-        return reference_ratio
-    
+
+    # 如果是 from_reference 且有参考图比例，使用参考图比例；无参考图则 fallback 到默认
+    if normalized == "from_reference":
+        return reference_ratio if reference_ratio else DEFAULT_ASPECT_RATIO
+
     return _normalize_choice(normalized, SUPPORTED_ASPECT_RATIOS, DEFAULT_ASPECT_RATIO)
 
 
@@ -541,16 +607,36 @@ async def _call_codex_image(
 
         polled = await _poll_codex_response(client_ref=None, token=token, response_id=result["response_id"], deadline=deadline)
         if polled is None:
+            # HTTP 请求本身就失败了，展示给用户
+            if update_status:
+                await update_status(f"⚠️ 轮询请求失败，{poll_interval}秒后重试...（第 {attempt} 次）")
             continue
+
+        # 有错误信息 → 直接报错，不再空等
+        if polled.get("error"):
+            raise RuntimeError(_humanize_codex_error(0, polled["error"]))
+
+        # 状态不再是 in_progress → 可能完成也可能失败
+        if polled.get("status") and polled["status"] not in ("in_progress", "queued", "completed"):
+            # failed / cancelled / incomplete 等终态
+            status_desc = polled["status"]
+            error_msg = polled.get("error") or f"任务状态异常：{status_desc}"
+            raise RuntimeError(_humanize_codex_error(0, error_msg))
+
         if polled.get("image_base64"):
             return {**result, **polled}
-        if polled.get("status") and polled["status"] != "in_progress":
+        if polled.get("status") == "completed":
             return {
                 **result,
                 **polled,
                 "image_base64": polled.get("image_base64") or result.get("image_base64"),
                 "revised_prompt": polled.get("revised_prompt") or result.get("revised_prompt"),
             }
+
+        # 还在进行中，显示实际状态
+        if update_status:
+            status_hint = polled.get("status") or "处理中"
+            await update_status(f"⏳ Codex {status_hint}...（第 {attempt} 次检查）")
 
     return result  # pragma: no cover
 
@@ -569,6 +655,22 @@ async def _poll_codex_response(
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(remaining_timeout)) as client:
             resp = await client.get(f"{CODEX_URL}/{response_id}", headers=headers)
+
+            # HTTP 错误 → 返回 error 字段而不是静默吞掉
+            if resp.status_code >= 400:
+                try:
+                    err_body = resp.json()
+                    err_msg = (err_body.get("error", {}) or {}).get("message") if isinstance(err_body.get("error"), dict) else err_body.get("error")
+                except Exception:
+                    err_msg = resp.text[:200] if resp.text else f"HTTP {resp.status_code}"
+                return {
+                    "image_base64": None,
+                    "revised_prompt": None,
+                    "status": "failed",
+                    "response_id": response_id,
+                    "error": str(err_msg) if err_msg else f"HTTP {resp.status_code}",
+                }
+
             data = resp.json().get("response", resp.json())
             if not data or not isinstance(data, dict):
                 return None
@@ -594,11 +696,21 @@ async def _poll_codex_response(
                         visit(v)
 
             visit(data)
+
+            # 提取错误信息
+            error_info: str | None = None
+            error_obj = data.get("error")
+            if isinstance(error_obj, dict):
+                error_info = error_obj.get("message") or error_obj.get("code") or str(error_obj)
+            elif isinstance(error_obj, str):
+                error_info = error_obj
+
             return {
                 "image_base64": image_base64,
                 "revised_prompt": revised_prompt,
                 "status": data.get("status") if isinstance(data.get("status"), str) else None,
                 "response_id": data.get("id") if isinstance(data.get("id"), str) else response_id,
+                "error": error_info,
             }
     except Exception:
         return None
@@ -696,21 +808,21 @@ class CodexImagePlugin(Plugin):
                     w = reference_image["width"]
                     h = reference_image["height"]
                     reference_size = f"{w}x{h}"
-                    # 计算比例（简化为最接近的常见比例）
+                    # 计算比例（简化为最接近的常见比例，±0.05 容差）
                     ratio = w / h
-                    if 0.99 <= ratio <= 1.01:
+                    if 0.95 <= ratio <= 1.05:
                         reference_ratio = "1:1"
-                    elif 1.49 <= ratio <= 1.51:
+                    elif 1.45 <= ratio <= 1.55:
                         reference_ratio = "3:2"
-                    elif 0.66 <= ratio <= 0.68:
+                    elif 0.64 <= ratio <= 0.69:
                         reference_ratio = "2:3"
-                    elif 1.32 <= ratio <= 1.34:
+                    elif 1.28 <= ratio <= 1.38:
                         reference_ratio = "4:3"
-                    elif 0.74 <= ratio <= 0.76:
+                    elif 0.72 <= ratio <= 0.78:
                         reference_ratio = "3:4"
-                    elif 1.77 <= ratio <= 1.79:
+                    elif 1.72 <= ratio <= 1.83:
                         reference_ratio = "16:9"
-                    elif 0.56 <= ratio <= 0.58:
+                    elif 0.54 <= ratio <= 0.59:
                         reference_ratio = "9:16"
                     else:
                         reference_ratio = f"{w}:{h}"  # 使用原始比例
