@@ -594,6 +594,17 @@ async def test_builtin_sudo_add_and_del_are_removed():
 
 
 @pytest.mark.asyncio
+async def test_builtin_sudo_without_args_shows_readonly_usage():
+    """空参数时返回只读用法提示，不直接列出用户。"""
+    from app.worker.command import _BUILTIN
+
+    client = AsyncMock()
+    event = AsyncMock()
+    await _BUILTIN["sudo"].handler(client, event, [], 1)
+    event.edit.assert_called_once_with("用法：,sudo ls（仅只读查询）")
+
+
+@pytest.mark.asyncio
 async def test_builtin_sudo_ls_still_works_with_summary(monkeypatch):
     """sudo ls 仍可用，返回授权摘要。"""
     from types import SimpleNamespace
@@ -638,4 +649,4 @@ async def test_builtin_sudo_ls_still_works_with_summary(monkeypatch):
     assert "Sudo 用户列表" in msg
     assert "TG用户 111（alice）" in msg
     assert "允许对话：全部（显式）" in msg
-    assert "允许命令：help,ping" in msg
+    assert ("允许命令：help,ping" in msg) or ("允许命令：ping,help" in msg)

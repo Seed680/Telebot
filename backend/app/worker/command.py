@@ -855,7 +855,11 @@ async def _cmd_sudo(client, event, args, account_id):
     from ..db.base import AsyncSessionLocal
     from ..db.models.account import SudoUser
 
-    sub = (args[0] if args else "ls").lower()
+    if not args:
+        await event.edit("用法：,sudo ls（仅只读查询）")
+        return
+
+    sub = args[0].lower()
 
     if sub in ("ls", "list"):
         async with AsyncSessionLocal() as db:

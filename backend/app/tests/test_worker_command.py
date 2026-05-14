@@ -203,9 +203,21 @@ def test_re_escape_special_prefix():
     assert not pat.match("aping")
 
 
-def test_only_account_restart_command_registered():
-    """守门测试：仅保留账号级 restart，不再保留项目级 reboot/rb。"""
-    assert "restart" in _BUILTIN
+def test_low_risk_commands_still_registered_and_high_risk_removed():
+    """守门测试：低风险命令仍注册；高危入口已移除。"""
+    for name in (
+        "help",
+        "status",
+        "ping",
+        "id",
+        "version",
+        "del",
+        "pause",
+        "resume",
+        "restart",
+        "sudo",
+    ):
+        assert name in _BUILTIN
     assert "reboot" not in _BUILTIN
     assert "rb" not in _BUILTIN
     assert "plugin" not in _BUILTIN
