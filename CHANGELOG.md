@@ -21,7 +21,7 @@
 
 ### Changed
 - PR1 安全收敛：删除高危 Telegram 命令入口，不再支持通过普通 Telegram 命令触发项目级 `,reboot/,rb`、远程插件运维 `,plugin install/remove/enable/disable/update`、以及 `,sudo add/,sudo del`；`sudo ls` 保留为只读查询。
-- PR2 命令层拆分目标落地：将 `worker/command.py` 相关逻辑按 dispatcher / builtin / template / sudo_gate / long_message 分层拆分，降低耦合并保持对外行为一致。
+- PR2 命令层拆分起步：已将 sudo 权限闸门与命令网关辅助逻辑抽离到 `backend/app/worker/commands/sudo_guard.py`，对外行为不变；dispatcher / builtin / template / long_message 等其余分层未在本版本落地。
 - PR3 引入 `ai_runtime.invoke()` 统一标准 AI 调用入口，减少多路径调用漂移。
 - PR4 补齐 sudo 关键路径 audit 记录，保证拒绝与关键操作可审计。
 - PR5 收敛内置 feature 注册表：将动态扫描与惰性缓存逻辑抽离到 `backend/app/feature_registry.py`，`BUILTIN_FEATURES` 既有访问方式保持不变。
