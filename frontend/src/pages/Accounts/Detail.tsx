@@ -389,7 +389,7 @@ export function AccountDetail() {
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3 md:grid-cols-3">
-              <div className="relative rounded-lg border p-4">
+              <div className="relative flex min-h-[11rem] flex-col rounded-lg border p-4">
                 <div className="pr-12 text-xs text-muted-foreground">已启用插件</div>
                 <div className="absolute right-4 top-3 text-2xl font-semibold leading-none">
                   {enabledPluginCount}
@@ -397,31 +397,31 @@ export function AccountDetail() {
                 <div className="mt-1 text-sm text-muted-foreground">
                   新账号通常先开自动回复、转发或定时任务。
                 </div>
-                <Button asChild size="sm" variant="outline" className="mt-3 w-full justify-between">
+                <Button asChild size="sm" variant="outline" className="mt-auto w-full justify-between">
                   <Link to={`/plugins?account=${aid}`}>
                     管理插件
                     <ChevronRight className="h-4 w-4" />
                   </Link>
                 </Button>
               </div>
-              <div className="rounded-lg border p-4">
+              <div className="flex min-h-[11rem] flex-col rounded-lg border p-4">
                 <div className="text-xs text-muted-foreground">复用命令模板</div>
                 <div className="mt-1 text-sm text-muted-foreground">
                   把账号 A 已经调好的回复、转发、AI 命令分配给这个账号。
                 </div>
-                <Button asChild size="sm" variant="outline" className="mt-3 w-full justify-between">
+                <Button asChild size="sm" variant="outline" className="mt-auto w-full justify-between">
                   <Link to={`/plugins/templates?account=${aid}`}>
                     管理命令模板
                     <ChevronRight className="h-4 w-4" />
                   </Link>
                 </Button>
               </div>
-              <div className="rounded-lg border p-4">
+              <div className="flex min-h-[11rem] flex-col rounded-lg border p-4">
                 <div className="text-xs text-muted-foreground">复制成熟配置</div>
                 <div className="mt-1 text-sm text-muted-foreground">
                   适合新账号：从一个已跑顺的账号复制规则和插件配置。
                 </div>
-                <Button asChild size="sm" variant="outline" className="mt-3 w-full justify-between">
+                <Button asChild size="sm" variant="outline" className="mt-auto w-full justify-between">
                   <Link to={`/settings?tab=backup&source=${aid}`}>
                     复制配置
                     <ChevronRight className="h-4 w-4" />
