@@ -18,6 +18,7 @@ from .api import alias as alias_api
 from .api import auth as auth_api
 from .api import config_bundle as config_bundle_api
 from .api import device_profiles as device_profiles_api
+from .api import llm_usage as llm_usage_api
 from .api import logs as logs_api
 from .api import network as network_api
 from .api import notify_bots as notify_bots_api
@@ -33,7 +34,7 @@ logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.I
 # Postgres advisory lock key（固定值，避免不同进程 key 漂移）
 _MIGRATION_ADVISORY_LOCK_KEY = 730140129
 _CSRF_HEADER_NAME = "X-Requested-With"
-_CSRF_HEADER_VALUE = "telebot-ui"
+_CSRF_HEADER_VALUES = {"telepilot-ui", "telebot-ui"}
 
 
 def _is_container_env() -> bool:
@@ -141,7 +142,7 @@ async def lifespan(app: FastAPI):
 
     # 2-D: 项目启动通知（若未配置 NotifyBot，send 会返回 False 并静默）
     try:
-        await notify_service.send(None, f"📦 telebot v{__version__} started")
+        await notify_service.send(None, f"📦 telepilot v{__version__} started")
     except Exception:  # noqa: BLE001
         logging.exception("发送启动通知失败")
 
@@ -171,7 +172,7 @@ async def lifespan(app: FastAPI):
                 logging.exception("stop_all_workers 失败")
 
 
-app = FastAPI(title="Telegram Userbot 管理系统", version=__version__, lifespan=lifespan)
+app = FastAPI(title="TelePilot", version=__version__, lifespan=lifespan)
 
 
 # ── CORS ──────────────────────────────────────────────────────────
@@ -193,7 +194,7 @@ def _csrf_required(method: str) -> bool:
 async def csrf_header_middleware(request: Request, call_next):
     if _csrf_required(request.method):
         header_val = request.headers.get(_CSRF_HEADER_NAME, "")
-        if header_val != _CSRF_HEADER_VALUE:
+        if header_val not in _CSRF_HEADER_VALUES:
             return JSONResponse(
                 status_code=403,
                 content={
@@ -240,6 +241,7 @@ app.include_router(notify_bots_api.router)  # Sprint4 #2D：多 Telegram Bot 通
 app.include_router(sudo_api.router)        # Sprint5：Sudo 用户管理
 app.include_router(alias_api.router)      # Sprint5：命令别名管理
 app.include_router(config_bundle_api.router)  # B1：Config Bundle export / dry-run
+app.include_router(llm_usage_api.router)  # AI 中心：最近 LLM 调用记录
 
 
 # ── 健康检查 ─────────────────────────────────────────────────────

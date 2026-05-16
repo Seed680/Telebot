@@ -1,6 +1,6 @@
 // 账号详情：3 个 Tab —— 概览 / 插件启停 / 风控
 import { useEffect, useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
@@ -9,12 +9,12 @@ import {
   Bot,
   ChevronRight,
   Gauge,
+  KeyRound,
   LayoutDashboard,
   Loader2,
   MessageCircle,
   Network,
   Power,
-  Shield,
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -46,7 +46,6 @@ import { AccountAvatar } from "@/components/AccountAvatar";
 import { AccountStatusBadge } from "@/components/AccountStatusBadge";
 import { MaskedPhone } from "@/components/MaskedPhone";
 import { IgnoredTab } from "@/pages/Accounts/IgnoredTab";
-import { CommandsTab } from "@/pages/Accounts/CommandsTab";
 import { BotTab } from "@/pages/Accounts/BotTab";
 import {
   deleteAccount,
@@ -80,18 +79,15 @@ import { Select } from "@/components/ui/select";
 import type { HumanizeConfig, ProxyTestResult } from "@/api/types";
 import { actionHint, actionLabel } from "@/lib/rate-actions";
 import type { ConfigSchema } from "@/components/plugin/ConfigDialog";
-
-// 功能列表从 feature-matrix API 动态获取，不再硬编码
-const FEATURE_CONFIG_PAGE_KEYS = new Set(["auto_reply", "autorepeat", "codex_image", "forward", "scheduler", "game24"]);
-
-function featureConfigPath(aid: number, key: string): string | null {
-  if (!aid || !FEATURE_CONFIG_PAGE_KEYS.has(key)) return null;
-  return `/accounts/${aid}/features/${key}`;
-}
+import { featureConfigPath } from "@/pages/Plugins/_shared/featureConfig";
 
 export function AccountDetail() {
   const params = useParams();
   const [searchParams] = useSearchParams();
+  const tabParam = searchParams.get("tab") || "overview";
+  const defaultTab = ["overview", "features", "bot", "rate", "proxy", "ignored"].includes(tabParam)
+    ? tabParam
+    : "overview";
   const aid = Number(params.aid);
   const nav = useNavigate();
   const qc = useQueryClient();
@@ -234,6 +230,10 @@ export function AccountDetail() {
   if (!detailQ.data) return <p>账号不存在</p>;
 
   const acc = detailQ.data;
+  const featureMetaMap = new Map((featureListQ.data ?? []).map((f) => [f.key, f]));
+  const enabledPluginCount = (featuresQ.data ?? []).filter(
+    (item) => item.enabled && !isPlatformFeature(featureMetaMap.get(item.feature_key) ?? item.feature_key),
+  ).length;
   // 老账号 / 异常账号可能 tg_user_id / tg_username 都是 null：worker 启动时
   // 会调 client.get_me() 自动回填（runtime.py:107）。这里给个友好提示，让用户
   // 明白"为什么这两栏是空的"以及怎么解。
@@ -258,27 +258,24 @@ export function AccountDetail() {
         <AccountStatusBadge status={acc.status} />
       </div>
 
-      <Tabs defaultValue={searchParams.get("tab") || "overview"}>
-        <TabsList>
-          <TabsTrigger value="overview" className="gap-1.5">
+      <Tabs defaultValue={defaultTab}>
+        <TabsList className="flex w-full justify-start gap-1 overflow-x-auto whitespace-nowrap sm:w-auto">
+          <TabsTrigger value="overview" className="shrink-0 gap-1.5">
             <LayoutDashboard className="h-4 w-4" /> 概览
           </TabsTrigger>
-          <TabsTrigger value="features" className="gap-1.5">
+          <TabsTrigger value="features" className="shrink-0 gap-1.5">
             <Bot className="h-4 w-4" /> 插件启停
           </TabsTrigger>
-          <TabsTrigger value="commands" className="gap-1.5">
-            <Shield className="h-4 w-4" /> 命令
-          </TabsTrigger>
-          <TabsTrigger value="bot" className="gap-1.5">
+          <TabsTrigger value="bot" className="shrink-0 gap-1.5">
             <MessageCircle className="h-4 w-4" /> Bot 联动
           </TabsTrigger>
-          <TabsTrigger value="rate" className="gap-1.5">
+          <TabsTrigger value="rate" className="shrink-0 gap-1.5">
             <Gauge className="h-4 w-4" /> 风控基础
           </TabsTrigger>
-          <TabsTrigger value="proxy" className="gap-1.5">
+          <TabsTrigger value="proxy" className="shrink-0 gap-1.5">
             <Network className="h-4 w-4" /> 出口/伪装
           </TabsTrigger>
-          <TabsTrigger value="ignored" className="gap-1.5">
+          <TabsTrigger value="ignored" className="shrink-0 gap-1.5">
             <Ban className="h-4 w-4" /> 忽略的群组
           </TabsTrigger>
         </TabsList>
@@ -355,6 +352,14 @@ export function AccountDetail() {
               </dl>
 
               <div className="flex flex-wrap gap-2">
+                {acc.status === "login_required" ? (
+                  <Button asChild size="sm">
+                    <Link to={`/accounts/new?relogin=${aid}`}>
+                      <KeyRound className="mr-1 h-4 w-4" />
+                      重新登录并保留配置
+                    </Link>
+                  </Button>
+                ) : null}
                 <Button
                   variant="outline"
                   size="sm"
@@ -363,6 +368,14 @@ export function AccountDetail() {
                   <Power className="mr-1 h-4 w-4" />
                   {acc.status === "active" ? "暂停账号" : "启动账号"}
                 </Button>
+                {acc.status !== "login_required" ? (
+                  <Button asChild variant="outline" size="sm">
+                    <Link to={`/accounts/new?relogin=${aid}`}>
+                      <KeyRound className="mr-1 h-4 w-4" />
+                      重新登录
+                    </Link>
+                  </Button>
+                ) : null}
                 <Button
                   variant="outline"
                   size="sm"
@@ -380,6 +393,62 @@ export function AccountDetail() {
                   }}
                 >
                   <Trash2 className="mr-1 h-4 w-4" /> 删除账号
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">新账号下一步</CardTitle>
+              <CardDescription>
+                这个区域主要给新账号配置时用：复用模板、开启插件、把成熟账号的配置复制过来。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3 md:grid-cols-3">
+              <div className="relative flex min-h-[11rem] flex-col rounded-lg border p-4">
+                <div className="pr-12 text-base font-semibold text-foreground">
+                  已启用插件
+                </div>
+                <div className="absolute right-4 top-3 text-2xl font-semibold leading-none">
+                  {enabledPluginCount}
+                </div>
+                <div className="mt-1 text-sm text-muted-foreground">
+                  新账号通常先开自动回复、转发或定时任务。
+                </div>
+                <Button asChild size="sm" variant="outline" className="mt-auto w-full justify-between">
+                  <Link to={`/plugins?account=${aid}`}>
+                    管理插件
+                    <ChevronRight className="h-4 w-4" />
+                  </Link>
+                </Button>
+              </div>
+              <div className="flex min-h-[11rem] flex-col rounded-lg border p-4">
+                <div className="text-base font-semibold text-foreground">
+                  复用命令模板
+                </div>
+                <div className="mt-1 text-sm text-muted-foreground">
+                  把账号 A 已经调好的回复、转发、AI 命令分配给这个账号。
+                </div>
+                <Button asChild size="sm" variant="outline" className="mt-auto w-full justify-between">
+                  <Link to={`/plugins/templates?account=${aid}`}>
+                    管理命令模板
+                    <ChevronRight className="h-4 w-4" />
+                  </Link>
+                </Button>
+              </div>
+              <div className="flex min-h-[11rem] flex-col rounded-lg border p-4">
+                <div className="text-base font-semibold text-foreground">
+                  复制成熟配置
+                </div>
+                <div className="mt-1 text-sm text-muted-foreground">
+                  适合新账号：从一个已跑顺的账号复制规则和插件配置。
+                </div>
+                <Button asChild size="sm" variant="outline" className="mt-auto w-full justify-between">
+                  <Link to={`/settings?tab=backup&source=${aid}`}>
+                    复制配置
+                    <ChevronRight className="h-4 w-4" />
+                  </Link>
                 </Button>
               </div>
             </CardContent>
@@ -446,7 +515,7 @@ export function AccountDetail() {
                                     size="sm"
                                     variant="outline"
                                     className="h-9 px-3"
-                                    onClick={() => nav(`/scheduler?aid=${aid}`)}
+                                    onClick={() => nav(`/plugins/scheduler?aid=${aid}`)}
                                   >
                                     配置 →
                                   </Button>
@@ -617,11 +686,6 @@ export function AccountDetail() {
               qc.invalidateQueries({ queryKey: ["matrix"] });
             }}
           />
-        </TabsContent>
-
-        {/* 自定义命令（账号 × 模板 启用关系） */}
-        <TabsContent value="commands">
-          <CommandsTab aid={aid} />
         </TabsContent>
 
         {/* 账号绑定普通 Bot 联动 */}

@@ -16,7 +16,7 @@ def main():
     with TestClient(app) as c:
         r = c.get(
             "/api/proxies/1/usage",
-            headers={"X-Requested-With": "telebot-ui"},
+            headers={"X-Requested-With": "telepilot-ui"},
         )
         print("status:", r.status_code)
         try:

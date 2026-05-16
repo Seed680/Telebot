@@ -57,6 +57,7 @@ from .ipc import (
     CMD_PAUSE,
     CMD_RESUME,
     CMD_STOP,
+    GCMD_KILL_SWITCH,
     GLOBAL_CHANNEL,
     RATELIMIT_EVENT_STREAM,
     RUNTIME_LOG_STREAM,
@@ -201,7 +202,8 @@ _BACKOFF = [5, 10, 20, 60, 300]
 # 放在用户目录而不是项目根，避免容器内只读 mount 之类的边界场景；目录不存在就自动建。
 # 命名 ``worker-{aid}.pid``，内容是该 worker 子进程的 PID。spawn 后立刻写入，
 # stop_worker 末尾删除——所以"还在的 PID 文件 + 文件里的 PID 还活着"= 上次启动遗留。
-_PID_DIR = Path.home() / ".telebot" / "worker-pids"
+_PID_DIR = Path.home() / ".telepilot" / "worker-pids"
+_LEGACY_PID_DIR = Path.home() / ".telebot" / "worker-pids"
 
 
 def _pid_file(account_id: int) -> Path:
@@ -264,64 +266,66 @@ def _kill_stale_workers() -> int:
 
     返回真正杀掉的个数（用于 startup 日志）。
     """
-    if not _PID_DIR.exists():
+    pid_dirs = [p for p in (_PID_DIR, _LEGACY_PID_DIR) if p.exists()]
+    if not pid_dirs:
         return 0
     killed = 0
-    for f in list(_PID_DIR.glob("worker-*.pid")):
-        try:
-            pid_text = f.read_text(encoding="ascii").strip()
-            pid = int(pid_text)
-        except (OSError, ValueError):
-            f.unlink(missing_ok=True)
-            continue
-        # 1) 探活
-        try:
-            os.kill(pid, 0)
-            alive = True
-        except ProcessLookupError:
-            alive = False
-        except PermissionError:
-            # 进程存在但跨用户——不是我们启的，skip
-            alive = False
-        if not alive:
-            f.unlink(missing_ok=True)
-            continue
-        # 2) 命令行验证（防 PID 复用：上次杀完，PID 被另一个无关进程拿走）
-        if not _is_our_worker_process(pid):
-            log.warning(
-                "PID 文件 %s 指向的 PID=%s 已被复用（命令行不匹配本项目），仅删 PID 文件",
-                f.name, pid,
-            )
-            f.unlink(missing_ok=True)
-            continue
-        # 3) 杀
-        log.warning("发现孤儿 worker pid=%s (file=%s)，发送 SIGTERM", pid, f.name)
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            f.unlink(missing_ok=True)
-            continue
-        except PermissionError:
-            log.warning("SIGTERM pid=%s 被拒（PermissionError），跳过", pid)
-            f.unlink(missing_ok=True)
-            continue
-        # 等 2s 给 worker 走 try/finally
-        deadline = time.time() + 2.0
-        while time.time() < deadline:
+    for pid_dir in pid_dirs:
+        for f in list(pid_dir.glob("worker-*.pid")):
+            try:
+                pid_text = f.read_text(encoding="ascii").strip()
+                pid = int(pid_text)
+            except (OSError, ValueError):
+                f.unlink(missing_ok=True)
+                continue
+            # 1) 探活
             try:
                 os.kill(pid, 0)
+                alive = True
             except ProcessLookupError:
-                break
-            time.sleep(0.1)
-        # 仍活着 → SIGKILL
-        try:
-            os.kill(pid, 0)
-            os.kill(pid, signal.SIGKILL)
-            log.warning("孤儿 worker pid=%s 不响应 SIGTERM，已 SIGKILL", pid)
-        except ProcessLookupError:
-            pass
-        f.unlink(missing_ok=True)
-        killed += 1
+                alive = False
+            except PermissionError:
+                # 进程存在但跨用户——不是我们启的，skip
+                alive = False
+            if not alive:
+                f.unlink(missing_ok=True)
+                continue
+            # 2) 命令行验证（防 PID 复用：上次杀完，PID 被另一个无关进程拿走）
+            if not _is_our_worker_process(pid):
+                log.warning(
+                    "PID 文件 %s 指向的 PID=%s 已被复用（命令行不匹配本项目），仅删 PID 文件",
+                    f.name, pid,
+                )
+                f.unlink(missing_ok=True)
+                continue
+            # 3) 杀
+            log.warning("发现孤儿 worker pid=%s (file=%s)，发送 SIGTERM", pid, f.name)
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                f.unlink(missing_ok=True)
+                continue
+            except PermissionError:
+                log.warning("SIGTERM pid=%s 被拒（PermissionError），跳过", pid)
+                f.unlink(missing_ok=True)
+                continue
+            # 等 2s 给 worker 走 try/finally
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            # 仍活着 → SIGKILL
+            try:
+                os.kill(pid, 0)
+                os.kill(pid, signal.SIGKILL)
+                log.warning("孤儿 worker pid=%s 不响应 SIGTERM，已 SIGKILL", pid)
+            except ProcessLookupError:
+                pass
+            f.unlink(missing_ok=True)
+            killed += 1
     return killed
 
 
@@ -373,15 +377,18 @@ async def start_supervisor() -> None:
     except Exception:  # noqa: BLE001
         log.exception("清理孤儿 worker 失败（不阻塞启动，但可能存在并发响应问题）")
 
-    # 1. 拉起所有 active 账号
+    # 1. 拉起所有 active 账号；若 kill switch 已开启，只记录托管状态，不启动 worker。
     async with AsyncSessionLocal() as db:
         rows = (
             await db.execute(
                 select(Account).where(Account.status == ACCOUNT_STATUS_ACTIVE)
             )
         ).scalars().all()
-    for acc in rows:
-        await start_worker(acc.id)
+    if await _kill_switch_enabled():
+        log.warning("kill switch 已开启，启动阶段跳过 %d 个 active worker", len(rows))
+    else:
+        for acc in rows:
+            await start_worker(acc.id)
 
     # 2. 启动后台监听协程
     _BG_TASKS.append(asyncio.create_task(_listen_global()))
@@ -465,6 +472,11 @@ async def stop_all_workers() -> None:
 
 async def start_worker(account_id: int) -> None:
     """拉起或恢复指定账号的 worker 子进程；幂等。"""
+    if await _kill_switch_enabled():
+        h = _WORKERS.setdefault(account_id, _WorkerHandle(account_id=account_id))
+        h.desired = "stopped"
+        log.info("kill switch 已开启，拒绝启动 worker: account=%d", account_id)
+        return
     lock = _WORKER_LOCKS.setdefault(account_id, asyncio.Lock())
     async with lock:
         h = _WORKERS.get(account_id)
@@ -521,6 +533,46 @@ async def resume_worker(account_id: int) -> None:
     await redis.publish(cmd_channel(account_id), make_cmd(CMD_RESUME))
 
 
+async def stop_running_workers() -> None:
+    """停止当前 supervisor 托管的全部 worker，但不取消后台监听任务。"""
+    for aid in list(_WORKERS.keys()):
+        await stop_worker(aid)
+
+
+async def start_active_workers() -> None:
+    """启动 DB 中状态为 active 的账号 worker。"""
+    async with AsyncSessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(Account.id).where(Account.status == ACCOUNT_STATUS_ACTIVE)
+            )
+        ).scalars().all()
+    for aid in rows:
+        await start_worker(int(aid))
+
+
+async def _kill_switch_enabled() -> bool:
+    try:
+        async with AsyncSessionLocal() as db:
+            row = await db.get(SystemSetting, "kill_switch")
+        if row is None:
+            return False
+        value = row.value
+        if isinstance(value, dict):
+            return bool(value.get("enabled", False))
+        return bool(value)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _account_status(account_id: int) -> str | None:
+    try:
+        async with AsyncSessionLocal() as db:
+            return await db.scalar(select(Account.status).where(Account.id == account_id))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def _listen_global() -> None:
     """监听 ``worker_global``：A Agent 登录完成会广播 ``start_worker`` 指令。"""
     redis = get_redis()
@@ -538,6 +590,11 @@ async def _listen_global() -> None:
                 aid = cmd.payload.get("account_id")
                 if aid:
                     await start_worker(int(aid))
+            elif cmd.type == GCMD_KILL_SWITCH:
+                if cmd.payload.get("enabled"):
+                    await stop_running_workers()
+                else:
+                    await start_active_workers()
     except asyncio.CancelledError:
         pass
     finally:
@@ -563,6 +620,11 @@ async def _monitor_loop() -> None:
                     continue
                 # 进程死了
                 if now < h.next_retry_at:
+                    continue
+                status = await _account_status(aid)
+                if status != ACCOUNT_STATUS_ACTIVE:
+                    h.desired = "stopped"
+                    log.info("worker %d 已退出且账号状态为 %s，停止自动重启", aid, status)
                     continue
                 h.fail_count += 1
                 if h.fail_count > len(_BACKOFF):

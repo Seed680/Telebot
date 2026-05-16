@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, Download, ShieldCheck, SlidersHorizontal, UserPlus } from "lucide-react";
+import { ArrowRight, Bot, Download, ShieldCheck, SlidersHorizontal, Sparkles, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -8,6 +9,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Card,
   CardContent,
@@ -23,6 +32,7 @@ import {
   patchSystemSettings,
   putGlobalLimits,
 } from "@/api/system";
+import { listAccounts } from "@/api/accounts";
 import { getErrMsg, api } from "@/lib/api";
 import { NotifyBots } from "./NotifyBots";
 import { SudoManagement } from "./SudoManagement";
@@ -35,9 +45,48 @@ interface KillSwitchState {
 
 type RuntimeLogLevel = "debug" | "info" | "warn" | "error";
 
+const GUIDE_STEPS = [
+  {
+    title: "1. 添加并启用账号",
+    desc: "先新增 Telegram 账号并启用它，系统会为该账号启动独立 worker。",
+    actionLabel: "去添加账号",
+    actionTo: "/accounts/new",
+  },
+  {
+    title: "2. 设置命令前缀",
+    desc: "在系统设置里确定命令开头字符，比如 ,ai。",
+    actionLabel: "去设置前缀",
+    actionTo: "/settings?tab=platform",
+  },
+  {
+    title: "3. 启用命令模板或调用插件",
+    desc: "去插件中心启用模板或插件，然后就能在 Telegram 里直接调用。",
+    actionLabel: "去插件中心",
+    actionTo: "/plugins",
+  },
+];
+
+function getGuideStepByPath(pathname: string, search: string): number {
+  if (pathname === "/accounts" || pathname === "/accounts/new") return 0;
+  if (pathname === "/settings" && new URLSearchParams(search).get("tab") === "platform") return 1;
+  if (pathname === "/plugins" || pathname.startsWith("/plugins/")) return 2;
+  return 0;
+}
+
 export function SettingsIndex() {
   const qc = useQueryClient();
-  const [tab, setTab] = useState<"global" | "security" | "sudo" | "notify" | "backup">("global");
+  const location = useLocation();
+  const nav = useNavigate();
+  const [searchParams] = useSearchParams();
+  const [tab, setTab] = useState<"account" | "platform" | "security" | "migration">("account");
+  const [guideExpanded, setGuideExpanded] = useState(false);
+  const [quickAid, setQuickAid] = useState("");
+  const [quickBindOpen, setQuickBindOpen] = useState(false);
+  const guideActive = searchParams.get("guide") === "1";
+  const currentStep = useMemo(
+    () => getGuideStepByPath(location.pathname, location.search),
+    [location.pathname, location.search],
+  );
 
   const settingsQ = useQuery({
     queryKey: ["system", "settings"],
@@ -50,6 +99,10 @@ export function SettingsIndex() {
   const killQ = useQuery<KillSwitchState>({
     queryKey: ["system", "kill-switch"],
     queryFn: async () => (await api.get("/api/system/kill-switch")).data,
+  });
+  const accountsQ = useQuery({
+    queryKey: ["accounts"],
+    queryFn: listAccounts,
   });
 
   const [prefix, setPrefix] = useState("");
@@ -85,10 +138,38 @@ export function SettingsIndex() {
     }
   }, [settingsQ.data]);
 
+  useEffect(() => {
+    const accounts = accountsQ.data ?? [];
+    if (accounts.length === 0) {
+      setQuickAid("");
+      return;
+    }
+    if (!quickAid || !accounts.some((a) => String(a.id) === quickAid)) {
+      setQuickAid(String(accounts[0].id));
+    }
+  }, [accountsQ.data, quickAid]);
+
   const [qps, setQps] = useState("0");
   useEffect(() => {
     if (limitsQ.data) setQps(String(limitsQ.data.api_qps_total ?? 0));
   }, [limitsQ.data]);
+
+  useEffect(() => {
+    const tabParam = searchParams.get("tab");
+    if (tabParam === "backup") {
+      setTab("migration");
+      return;
+    }
+    if (tabParam === "account" || tabParam === "platform" || tabParam === "security" || tabParam === "migration") {
+      setTab(tabParam);
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    const accounts = accountsQ.data ?? [];
+    if (quickAid || accounts.length === 0) return;
+    setQuickAid(String(accounts[0].id));
+  }, [accountsQ.data, quickAid]);
 
   const savePrefix = useMutation({
     mutationFn: () => patchSystemSettings({ command_prefix: prefix }),
@@ -170,35 +251,107 @@ export function SettingsIndex() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-24">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">系统设置</h1>
         <p className="text-sm text-muted-foreground">
-          按用途拆分为全局控制、管理员账号、通知渠道，减少跨页面跳转。
+          按账号、平台、安全、迁移拆分，保留常用入口并收敛历史配置位。
         </p>
       </div>
 
+      <Card className="border-dashed">
+        <CardHeader>
+          <CardTitle className="text-base">猜你想要？</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3 lg:flex-row lg:items-center">
+          <Button asChild variant="outline" size="sm">
+            <Link to="/ai/providers">添加模型</Link>
+          </Button>
+          <Button asChild variant="outline" size="sm">
+            <Link to="/plugins/templates">添加命令</Link>
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={(accountsQ.data ?? []).length === 0}
+            onClick={() => {
+              const accounts = accountsQ.data ?? [];
+              if (accounts.length === 1) {
+                nav(`/accounts/${accounts[0].id}?tab=bot`);
+                return;
+              }
+              setQuickBindOpen(true);
+            }}
+          >
+            <Bot className="mr-1 h-4 w-4" /> 绑定机器人
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Dialog open={quickBindOpen} onOpenChange={setQuickBindOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>选择要绑定机器人的账号</DialogTitle>
+            <DialogDescription>
+              请选择一个账号，进入该账号的 Bot 联动配置页。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="quick-bind-account">账号</Label>
+            <Select
+              id="quick-bind-account"
+              value={quickAid}
+              onChange={(e) => setQuickAid(e.target.value)}
+              className="w-full"
+              disabled={(accountsQ.data ?? []).length === 0}
+            >
+              {(accountsQ.data ?? []).map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.display_name || (a.tg_username ? `@${a.tg_username}` : a.phone)}
+                </option>
+              ))}
+            </Select>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setQuickBindOpen(false)}>
+              取消
+            </Button>
+            <Button
+              disabled={!quickAid}
+              onClick={() => {
+                setQuickBindOpen(false);
+                nav(`/accounts/${quickAid}?tab=bot`);
+              }}
+            >
+              前往配置
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)}>
         <TabsList>
-          <TabsTrigger value="global" className="gap-1.5">
-            <SlidersHorizontal className="h-4 w-4" /> 全局控制
+          <TabsTrigger value="account" className="gap-1.5">
+            <ShieldCheck className="h-4 w-4" /> 账号
+          </TabsTrigger>
+          <TabsTrigger value="platform" className="gap-1.5">
+            <SlidersHorizontal className="h-4 w-4" /> 平台
           </TabsTrigger>
           <TabsTrigger value="security" className="gap-1.5">
-            <ShieldCheck className="h-4 w-4" /> 管理员账号
+            <UserPlus className="h-4 w-4" /> 安全
           </TabsTrigger>
-          <TabsTrigger value="sudo" className="gap-1.5">
-            <UserPlus className="h-4 w-4" /> Sudo 用户
-          </TabsTrigger>
-          <TabsTrigger value="notify" className="gap-1.5">
-            <Bell className="h-4 w-4" /> 通知渠道
-          </TabsTrigger>
-          <TabsTrigger value="backup" className="gap-1.5">
-            <Download className="h-4 w-4" /> 备份恢复
+          <TabsTrigger value="migration" className="gap-1.5">
+            <Download className="h-4 w-4" /> 迁移
           </TabsTrigger>
         </TabsList>
 
-        <TabsContent value="global" className="space-y-6">
-          <Card>
+        <TabsContent value="account" className="space-y-6">
+          <UserAccount />
+          <SudoManagement />
+        </TabsContent>
+
+        <TabsContent value="platform" className="space-y-6">
+          <Card className={guideActive && currentStep === 1 ? "siri-glow-soft" : undefined}>
             <CardHeader>
               <CardTitle className="text-base">命令前缀</CardTitle>
               <CardDescription>
@@ -216,15 +369,81 @@ export function SettingsIndex() {
                   />
                 </div>
                 <Button
+                  className={
+                    guideActive && currentStep === 1
+                      ? "siri-glow text-primary-foreground hover:text-primary-foreground"
+                      : undefined
+                  }
                   onClick={() => prefix && savePrefix.mutate()}
                   disabled={savePrefix.isPending}
                 >
                   保存
                 </Button>
               </div>
+              {guideActive ? (
+                <div className="mt-3">
+                  <GuideInlineCard
+                    expanded={guideExpanded}
+                    currentStep={currentStep}
+                    onToggle={() => setGuideExpanded((v) => !v)}
+                    onPrimary={() => nav("/plugins?guide=1")}
+                    onSkip={() => nav("/plugins?guide=1")}
+                  />
+                </div>
+              ) : null}
+              <div className="mt-4 max-w-[460px] rounded-xl border bg-background p-3 text-xs">
+                <div className="mb-3 font-medium">触发预览</div>
+                <div className="rounded-2xl border bg-gradient-to-b from-sky-50 to-emerald-50 p-4 dark:from-sky-950/30 dark:to-emerald-950/20">
+                  <div className="space-y-2.5">
+                    <div className="w-fit max-w-[78%] rounded-2xl rounded-bl-lg border bg-card px-3.5 py-2.5 text-foreground shadow-sm sm:max-w-[66%]">
+                      <div className="font-mono text-sm">
+                        这是一段被回复的原文。
+                      </div>
+                    </div>
+
+                    <div className="ml-auto w-fit max-w-[68%] rounded-2xl rounded-br-lg bg-sky-500 px-3.5 py-2.5 text-white shadow-sm sm:max-w-[52%]">
+                      <div className="mb-1.5 inline-block max-w-full rounded-lg border-l-2 border-white/70 bg-white/15 px-2 py-1 text-[11px] leading-relaxed text-white/90">
+                        这是一段被回复的原文。
+                      </div>
+                      <div className="font-mono text-sm">{prefix || ","}ai 请总结这段内容</div>
+                    </div>
+
+                    <div className="ml-auto w-fit max-w-[78%] rounded-2xl rounded-br-lg bg-sky-500 px-3.5 py-2.5 text-white shadow-sm sm:max-w-[66%]">
+                      <div className="font-semibold text-sm">{prefix || ","}(๑•̌.•̑๑)ˀ̣ˀ̣ˀ̣ 好奇</div>
+                      <div className="mt-2 inline-block max-w-full rounded-lg border-l-2 border-white/60 bg-white/15 px-2 py-1 text-white/90">
+                        这是一段被回复的原文。
+                      </div>
+                      <div className="mt-2 block w-fit max-w-full rounded-lg border-l-2 border-white/60 bg-white/15 px-2 py-1 text-white/90">
+                        请总结这段内容
+                      </div>
+                      <div className="mt-2.5 font-semibold text-sm">ᕦ(ˇò_ó)ᕤ 回答</div>
+                      <p className="mt-2 text-white/90 leading-relaxed">
+                        这是 AI 回答示例，已按当前消息模板渲染。
+                      </p>
+                      <div className="mt-2 inline-block max-w-full rounded-lg border-l-2 border-white/60 bg-white/15 px-2 py-1 text-white/90">
+                        这里是从第三行开始的回答内容。
+                      </div>
+                      <div className="my-2.5 text-left text-white/70">━━━━━━━━━━━━━━━</div>
+                      <div className="text-left font-semibold text-white/95 text-[11px]">✦ GPT-5.5 · OpenAI ✦</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </CardContent>
           </Card>
 
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">通知渠道</CardTitle>
+              <CardDescription>设置系统事件的推送目标与通知机器人。</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <NotifyBots />
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="security" className="space-y-6">
           <Card>
             <CardHeader>
               <CardTitle className="text-base">全局总闸（Kill Switch）</CardTitle>
@@ -289,54 +508,6 @@ export function SettingsIndex() {
                   </p>
                 </div>
                 <Button onClick={() => saveTimezone.mutate()} disabled={saveTimezone.isPending}>
-                  保存
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">LLM 成本限额</CardTitle>
-              <CardDescription>0 = 不限制；按账号统计，worker 调用前生效</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="grid gap-3 md:grid-cols-4">
-                <div className="space-y-1.5">
-                  <Label>每分钟调用</Label>
-                  <Input
-                    inputMode="numeric"
-                    value={llmLimits.per_minute}
-                    onChange={(e) => setLlmLimits((v) => ({ ...v, per_minute: e.target.value.replace(/[^0-9]/g, "") }))}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>每日调用</Label>
-                  <Input
-                    inputMode="numeric"
-                    value={llmLimits.daily_requests}
-                    onChange={(e) => setLlmLimits((v) => ({ ...v, daily_requests: e.target.value.replace(/[^0-9]/g, "") }))}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>每日 Token</Label>
-                  <Input
-                    inputMode="numeric"
-                    value={llmLimits.daily_tokens}
-                    onChange={(e) => setLlmLimits((v) => ({ ...v, daily_tokens: e.target.value.replace(/[^0-9]/g, "") }))}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>高价每日调用</Label>
-                  <Input
-                    inputMode="numeric"
-                    value={llmLimits.premium_daily}
-                    onChange={(e) => setLlmLimits((v) => ({ ...v, premium_daily: e.target.value.replace(/[^0-9]/g, "") }))}
-                  />
-                </div>
-              </div>
-              <div className="mt-3">
-                <Button onClick={() => saveLlmLimits.mutate()} disabled={saveLlmLimits.isPending}>
                   保存
                 </Button>
               </div>
@@ -422,24 +593,118 @@ export function SettingsIndex() {
               </div>
             </CardContent>
           </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">LLM 成本限额</CardTitle>
+              <CardDescription>0 = 不限制；按账号统计，worker 调用前生效</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-3 md:grid-cols-4">
+                <div className="space-y-1.5">
+                  <Label>每分钟调用</Label>
+                  <Input
+                    inputMode="numeric"
+                    value={llmLimits.per_minute}
+                    onChange={(e) => setLlmLimits((v) => ({ ...v, per_minute: e.target.value.replace(/[^0-9]/g, "") }))}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>每日调用</Label>
+                  <Input
+                    inputMode="numeric"
+                    value={llmLimits.daily_requests}
+                    onChange={(e) => setLlmLimits((v) => ({ ...v, daily_requests: e.target.value.replace(/[^0-9]/g, "") }))}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>每日 Token</Label>
+                  <Input
+                    inputMode="numeric"
+                    value={llmLimits.daily_tokens}
+                    onChange={(e) => setLlmLimits((v) => ({ ...v, daily_tokens: e.target.value.replace(/[^0-9]/g, "") }))}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>高价每日调用</Label>
+                  <Input
+                    inputMode="numeric"
+                    value={llmLimits.premium_daily}
+                    onChange={(e) => setLlmLimits((v) => ({ ...v, premium_daily: e.target.value.replace(/[^0-9]/g, "") }))}
+                  />
+                </div>
+              </div>
+              <div className="mt-3">
+                <Button onClick={() => saveLlmLimits.mutate()} disabled={saveLlmLimits.isPending}>
+                  保存
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
-        <TabsContent value="security">
-          <UserAccount />
-        </TabsContent>
-
-        <TabsContent value="sudo">
-          <SudoManagement />
-        </TabsContent>
-
-        <TabsContent value="notify">
-          <NotifyBots />
-        </TabsContent>
-
-        <TabsContent value="backup">
+        <TabsContent value="migration">
           <ConfigBackup />
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+function GuideInlineCard({
+  expanded,
+  currentStep,
+  onToggle,
+  onPrimary,
+  onSkip,
+}: {
+  expanded: boolean;
+  currentStep: number;
+  onToggle: () => void;
+  onPrimary: () => void;
+  onSkip: () => void;
+}) {
+  const step = GUIDE_STEPS[currentStep];
+  const percent = ((currentStep + 1) / GUIDE_STEPS.length) * 100;
+
+  if (!expanded) {
+    return (
+      <button
+        type="button"
+        onClick={onToggle}
+        className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary shadow-sm shadow-primary/20 transition hover:bg-primary/15"
+        aria-label="打开新手指引"
+      >
+        <Sparkles className="h-4 w-4" />
+        新手指引：当前第 2 步，点击展开详情
+      </button>
+    );
+  }
+
+  return (
+    <div className="max-w-md rounded-2xl border bg-card/95 p-4 shadow-lg shadow-primary/10">
+      <div className="mb-2 flex items-center justify-between text-xs text-muted-foreground">
+        <span>新手指引</span>
+        <button type="button" onClick={onToggle} className="hover:text-foreground">
+          收起
+        </button>
+      </div>
+      <div className="mb-2 text-sm font-semibold">{step.title}</div>
+      <p className="text-xs leading-relaxed text-muted-foreground">{step.desc}</p>
+      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
+        <div
+          className="h-full rounded-full bg-primary transition-all"
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Button size="sm" onClick={onPrimary}>
+          下一步：去插件中心 <ArrowRight className="ml-1 h-4 w-4" />
+        </Button>
+        <Button size="sm" variant="outline" onClick={onSkip}>
+          跳过这步
+        </Button>
+      </div>
     </div>
   );
 }

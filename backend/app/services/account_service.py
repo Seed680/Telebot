@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -24,12 +25,14 @@ from telethon.sessions import StringSession
 from ..crypto import decrypt_bytes, decrypt_str
 from ..db.models.account import (
     ACCOUNT_STATUS_ACTIVE,
+    ACCOUNT_STATUS_LOGIN_REQUIRED,
     ACCOUNT_STATUS_PAUSED,
     Account,
     Proxy,
 )
 from ..db.models.feature import AccountFeature
 from ..db.models.rule import Rule
+from ..db.models.system import SystemSetting
 from ..redis_client import get_redis
 from ..schemas.account import (
     AccountDetail,
@@ -47,6 +50,8 @@ from ..worker.ipc import (
     cmd_channel,
     make_cmd,
 )
+
+log = logging.getLogger(__name__)
 
 # 头像缓存 TTL：超过这个时长就让 worker 重拉
 _AVATAR_TTL_SECONDS = 24 * 3600
@@ -200,25 +205,66 @@ async def update_account(db: AsyncSession, aid: int, data: AccountUpdateRequest)
 
 # ── 暂停 / 恢复 ───────────────────────────────────────────────────
 async def pause(db: AsyncSession, aid: int) -> None:
-    """暂停账号：状态置 paused，并通过 IPC 通知 worker pause。"""
+    """暂停账号：状态置 paused，并让 supervisor 停止对应 worker。"""
     acc = await db.get(Account, aid)
     if not acc:
         raise _not_found()
     acc.status = ACCOUNT_STATUS_PAUSED
     await db.commit()
-    await _publish(cmd_channel(aid), make_cmd(CMD_PAUSE))
+    try:
+        from ..worker import supervisor
+
+        await supervisor.stop_worker(aid)
+    except Exception:  # noqa: BLE001
+        log.warning("通过 supervisor 停止 worker 失败，回退到 IPC pause aid=%s", aid, exc_info=True)
+        await _publish(cmd_channel(aid), make_cmd(CMD_PAUSE))
 
 
 async def resume(db: AsyncSession, aid: int) -> None:
-    """恢复账号：状态置 active，通过 IPC 通知 worker resume；若 worker 未起则广播 start。"""
+    """恢复账号：状态置 active，并让 supervisor 拉起对应 worker。"""
     acc = await db.get(Account, aid)
     if not acc:
         raise _not_found()
+    try:
+        _ensure_account_secrets_decryptable(acc)
+    except ValueError as exc:
+        acc.status = ACCOUNT_STATUS_LOGIN_REQUIRED
+        await db.commit()
+        raise _err(
+            "ACCOUNT_SESSION_DECRYPT_FAILED",
+            "账号登录凭据无法解密，通常是 MASTER_KEY 已变更。请恢复原 MASTER_KEY，或重新登录该账号。",
+            422,
+        ) from exc
     acc.status = ACCOUNT_STATUS_ACTIVE
     await db.commit()
-    # 先尝试恢复（若 worker 在跑）；同时广播 start_worker（若未起）让 supervisor 拉起
-    await _publish(cmd_channel(aid), make_cmd(CMD_RESUME))
-    await _publish(GLOBAL_CHANNEL, make_cmd("start_worker", account_id=aid))
+    if await _kill_switch_enabled(db):
+        return
+    try:
+        from ..worker import supervisor
+
+        await supervisor.start_worker(aid)
+    except Exception:  # noqa: BLE001
+        log.warning("通过 supervisor 启动 worker 失败，回退到 IPC resume/start aid=%s", aid, exc_info=True)
+        await _publish(cmd_channel(aid), make_cmd(CMD_RESUME))
+        await _publish(GLOBAL_CHANNEL, make_cmd("start_worker", account_id=aid))
+
+
+async def _kill_switch_enabled(db: AsyncSession) -> bool:
+    row = await db.get(SystemSetting, "kill_switch")
+    if row is None:
+        return False
+    value = row.value
+    if isinstance(value, dict):
+        return bool(value.get("enabled", False))
+    return bool(value)
+
+
+def _ensure_account_secrets_decryptable(acc: Account) -> None:
+    """恢复前先验证账号核心密钥，避免 worker 启动后立刻 down。"""
+
+    decrypt_bytes(acc.session_enc)
+    decrypt_str(acc.api_id_enc)
+    decrypt_str(acc.api_hash_enc)
 
 
 # ── 删除 ──────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-"""telebot 后端应用包。
+"""TelePilot 后端应用包。
 
 ``__version__`` 是后端的单点版本号，main.py 的 ``FastAPI(version=...)`` 和
 worker 的 ``,version`` 命令均读这里。每次 release 同时改前端 ``frontend/src/lib/version.ts``、
@@ -9,5 +9,5 @@ worker 的 ``,version`` 命令均读这里。每次 release 同时改前端 ``fr
 的 ``APP_STAGE`` 必须保持一致。设为 ``None`` 可以摘掉（达到 1.0.0 通常就摘）。
 ``GET /api/system/version`` 会返回它，前端启动时拉一次做版本一致性检测。
 """
-__version__ = "0.13.1"
+__version__ = "0.15.0"
 APP_STAGE: str | None = "feature"

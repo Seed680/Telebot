@@ -40,8 +40,8 @@
 
 ```bash
 # 1. clone + 装依赖
-git clone https://github.com/<yourusername>/telebot.git
-cd telebot
+git clone https://github.com/<yourusername>/telebot.git telepilot
+cd telepilot
 cp .env.example .env  # 改 MASTER_KEY / JWT_SECRET 为强随机串
 chmod 600 .env
 
@@ -72,8 +72,8 @@ cd frontend && pnpm run build
 
 ```bash
 # 1. fork 后克隆你的 fork
-git clone git@github.com:<yourname>/telebot.git
-cd telebot
+git clone git@github.com:<yourname>/telebot.git telepilot
+cd telepilot
 git remote add upstream https://github.com/<projectowner>/telebot.git
 
 # 2. 从 main 拉最新

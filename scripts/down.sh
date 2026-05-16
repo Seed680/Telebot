@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一键停止本机开发环境：
 #   - 杀后端 uvicorn / 前端 vite（按 .run/*.pid）
-#   - 杀掉所有"工作目录在 telebot/"的孤儿 multiprocessing worker
+#   - 杀掉所有"工作目录在 TelePilot/Telebot/"的孤儿 multiprocessing worker
 #     （uvicorn --reload 重启主进程时会留下 spawn 出去的孤儿 worker，
 #      ppid 变成 1，跟主进程脱钩——下次 make up 它们仍跑老代码！）
 #   - docker compose -f docker-compose.dev.yml down（保留卷，下次 up 接着用）
@@ -32,33 +32,35 @@ kill_by_port() {
 kill_by_port 8000 "后端残留"
 kill_by_port 5173 "前端残留"
 
-# 关键：清理 telebot 派生的孤儿 multiprocessing worker
+# 关键：清理 TelePilot 派生的孤儿 multiprocessing worker
 # 场景：uvicorn --reload 重启主进程时，supervisor 在 lifespan 关闭里 stop_all_workers
 # 但有时来不及，spawn 出的 worker 子进程会被 init (pid 1) 接管成孤儿。
 # 这些孤儿仍连着 Redis pubsub 处理 TG 消息，但跑的是**旧代码**——
 # 用户改完代码后看到 ai 命令响应永远是几小时前的逻辑。
 #
-# 检测方式：**用 lsof 看进程打开的文件**，含 telebot/backend 路径就视为本项目派生。
+# 检测方式：**用 lsof 看进程打开的文件**，含当前 backend 路径就视为本项目派生。
 # 不能用 cwd——init 接管孤儿时会把 cwd 重置成 ``/``，cwd 检测对真正的孤儿失效。
 # 而 worker 进程在跑时会持有 .py 文件 fd（包括 mmap 的 cython 模块、socket 等），
-# lsof 出来含 ``telebot/backend`` 字样几乎一定是本项目的进程。
-kill_orphan_telebot_workers() {
+# lsof 出来含当前 backend 路径几乎一定是本项目的进程；旧 telebot/backend 迁移期保留。
+kill_orphan_telepilot_workers() {
   local pids killed=()
   pids="$(pgrep -f 'multiprocessing.spawn' 2>/dev/null || true)"
   [[ -z "$pids" ]] && return 0
+  local backend_path="$ROOT_DIR/backend"
   local pid
   for pid in $pids; do
-    # lsof 列所有打开的文件；如果有任何条目含 telebot/backend 路径，判定为本项目进程
-    if lsof -p "$pid" 2>/dev/null | grep -q "telebot/backend"; then
+    # lsof 列所有打开的文件；如果有任何条目含项目 backend 路径，判定为本项目进程
+    if lsof -p "$pid" 2>/dev/null | grep -Fq "$backend_path" \
+      || lsof -p "$pid" 2>/dev/null | grep -Eq "(telebot|Telebot|telepilot|TelePilot)/backend"; then
       kill -9 "$pid" 2>/dev/null || true
       killed+=("$pid")
     fi
   done
   if (( ${#killed[@]} > 0 )); then
-    warn "杀掉 telebot 孤儿 worker（这些跑老代码会让 ,ai 响应不对）: ${killed[*]}"
+    warn "杀掉 TelePilot 孤儿 worker（这些跑老代码会让 ,ai 响应不对）: ${killed[*]}"
   fi
 }
-kill_orphan_telebot_workers
+kill_orphan_telepilot_workers
 
 # 关 docker pg+redis（保留 volume）
 log "停止 PostgreSQL + Redis 容器（数据保留）"

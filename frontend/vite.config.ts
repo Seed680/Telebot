@@ -27,9 +27,9 @@ export default defineConfig({
         "robots.txt",
       ],
       manifest: {
-        name: "Telegram Userbot 管理系统",
+        name: "TelePilot",
         short_name: "Userbot",
-        description: "Telegram Userbot 管理后台",
+        description: "TelePilot 管理控制台",
         lang: "zh-CN",
         start_url: "/",
         scope: "/",

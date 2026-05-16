@@ -17,6 +17,333 @@
 
 ---
 
+## [0.15.0] — 2026-05-16 · feature · TelePilot rename 收口
+
+### Changed
+- 项目品牌、Web/PWA 标题、前后端包名、启动通知、账号 Bot/NotifyBot 文案和 `,version` 输出统一为 TelePilot。
+- README、部署文档、插件开发指南和远程插件指南同步 0.13/0.14 已完成能力，并明确 0.15 后的新命名与兼容边界。
+- worker PID 目录迁移到 `~/.telepilot/worker-pids`，启动清理仍会扫描旧 `~/.telebot/worker-pids`，避免升级后残留旧 worker。
+- 本地启动/停止脚本改为基于当前仓库 `backend` 路径识别孤儿 worker，同时兼容旧 `telebot/backend` 路径。
+
+### Added
+- 插件 manifest 新增 `min_telepilot_version` 字段；旧 `min_telebot_version` 继续作为 legacy alias 解析，避免远程插件生态硬断。
+- 远程插件 `plugin.json` 元数据支持 `min_telepilot_version`，并保留旧字段写入兼容。
+- 前端主题存储切换为 `telepilot-theme`，首次读取会兼容迁移旧 `telebot-theme`。
+
+### Compatibility
+- 后端 CSRF 过渡期同时接受 `X-Requested-With: telepilot-ui` 与旧 `telebot-ui`，避免旧前端缓存或脚本升级后直接 403。
+- Docker volume、数据库默认账号/库名、`TELEBOT_WORKER_PROC` 等底层兼容名暂不强制迁移，避免升级后历史数据“消失”或 worker 连接池语义变化。
+
+### Verification
+- `git diff --check` 通过。
+- `backend/.venv/bin/ruff check backend/app/main.py backend/app/worker/plugins/manifest.py backend/app/worker/plugins/loader.py backend/app/worker/supervisor.py backend/app/services/remote_plugin_service.py backend/app/tests/test_csrf_header.py backend/app/tests/test_plugin_loader.py` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telepilot_pycache backend/.venv/bin/python -m pytest backend/app/tests/test_csrf_header.py backend/app/tests/test_plugin_loader.py` 通过（17 passed）。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telepilot_pycache backend/.venv/bin/python -m pytest backend` 通过（567 passed, 2 skipped）。
+- `pnpm --dir frontend exec tsc -b --noEmit` 通过。
+- `pnpm --dir frontend build` 通过。
+- `bash -n scripts/up.sh scripts/down.sh scripts/prod-up.sh deploy/backup.sh deploy/restore.sh deploy/backup-keys.sh` 通过。
+- `docker compose -f docker-compose.yml config` 与 `docker compose -f docker-compose.dev.yml config` 均可渲染（dev compose 仅提示 `version` 字段已过时）。
+
+---
+
+## [0.14.17] — 2026-05-16 · fix · 支持原账号重新登录覆盖 session
+
+### Fixed
+- 新增“重新登录并保留配置”入口：账号处于 `login_required` 时可直接从账号详情发起重登，成功后覆盖原账号 session，不再需要删除账号或手动迁移忽略群组。
+- 登录向导支持 `relogin` 模式：锁定原手机号、复用原账号 ID，重登成功后返回当前账号详情页。
+- 后端重登会同时用当前 `MASTER_KEY` 重新加密保存 session、API ID、API Hash，并恢复账号为 active，解决只换 session 但 API 凭据仍旧密钥加密的问题。
+- 后端增加手机号与 Telegram 用户 ID 校验，避免把其他 Telegram 账号误覆盖到当前账号配置上。
+
+### Verification
+- `git diff --check` 通过。
+- `backend/.venv/bin/ruff check backend/app/api/accounts.py backend/app/services/login_service.py backend/app/schemas/account.py backend/app/tests/test_accounts.py` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telebot_pycache backend/.venv/bin/python -m pytest backend/app/tests/test_accounts.py backend/app/tests/test_config_bundle.py` 通过。
+- `pnpm --dir frontend exec tsc -b --noEmit` 通过。
+- `pnpm --dir frontend build` 通过。
+
+---
+
+## [0.14.16] — 2026-05-16 · fix · Config Bundle 支持忽略列表迁移
+
+### Fixed
+- 账号级 Config Bundle 现在会导出、dry-run 和 confirm 写入忽略列表，支持把旧账号几十个忽略群组迁移到重新登录后的新账号。
+- Config Bundle dry-run 结果增加“忽略列表”实体展示，避免只迁移插件规则和命令绑定时遗漏账号级忽略名单。
+- 设置页 Config Bundle 文案补充“忽略列表”，明确它适用于账号配置迁移，不包含 session / API key / Bot Token 等敏感登录凭据。
+
+### Verification
+- `git diff --check` 通过。
+- `backend/.venv/bin/ruff check backend/app/api/config_bundle.py backend/app/services/config_bundle_service.py backend/app/schemas/config_bundle.py backend/app/tests/test_config_bundle.py` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telebot_pycache backend/.venv/bin/python -m pytest backend/app/tests/test_config_bundle.py` 通过（11 passed）。
+- `pnpm --dir frontend exec tsc -b --noEmit` 通过。
+- `pnpm --dir frontend build` 通过。
+- 本地读取 `aid=1` Config Bundle：`features=7`、`rules=2`、`command_links=5`、`ignored_peers=56`、`size_bytes=8275`。
+- 本地全量备份 round-trip：导出包含 `ignored_peers=56`；同文件导入结果 `imported=0`、`skipped=86`、`warnings=0`。
+
+---
+
+## [0.14.15] — 2026-05-16 · polish · 优化命令前缀触发预览
+
+### Changed
+- 设置页命令前缀预览改为更接近 Telegram 的左右对话气泡：被回复原文在左侧，用户触发命令与 AI 回复在右侧。
+- 预览气泡缩小宽度、增加内边距和蓝色回复样式，让手机端观感更真实。
+- AI 回复内的引用块、分割线和模型标识改为同色系样式，避免预览区域显得像普通表单文本。
+
+### Verification
+- `git diff --check` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telebot_pycache backend/.venv/bin/python -m py_compile backend/app/__init__.py` 通过。
+- `pnpm --dir frontend exec tsc -b --noEmit` 通过。
+- `pnpm --dir frontend build` 通过。
+
+---
+
+## [0.14.14] — 2026-05-16 · fix · 明确旧密钥导致的账号与 Bot 失效
+
+### Fixed
+- 账号恢复前会先验证 session / api_id / api_hash 是否能用当前 `MASTER_KEY` 解密；失败时直接置为 `login_required` 并提示恢复原 `MASTER_KEY` 或重新登录账号，不再启动后反复 down。
+- worker 启动阶段遇到账号凭据解密失败时，会写入清晰运行日志并停止自动重启该账号。
+- 账号 Bot 启用时会校验已保存 Bot Token 是否还能解密；旧 `MASTER_KEY` 加密的 token 会提示“重新保存 Bot Token”，不再只显示泛泛的 422。
+- 前端错误解析支持 FastAPI 校验数组，减少 `Request failed with status code 422` 这类无效提示。
+
+### Verification
+- `git diff --check` 通过。
+- `backend/.venv/bin/ruff check backend/app` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telebot_pycache backend/.venv/bin/python -m py_compile backend/app/services/account_service.py backend/app/services/account_bot_service.py backend/app/worker/runtime.py backend/app/worker/supervisor.py backend/app/__init__.py` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telebot_pycache backend/.venv/bin/python -m pytest backend/app/tests/test_account_service.py backend/app/tests/test_account_bot.py backend/app/tests/test_kill_switch_supervisor.py` 通过（21 passed）。
+- `pnpm --dir frontend exec tsc -b --noEmit` 通过。
+- `pnpm --dir frontend build` 通过。
+
+---
+
+## [0.14.13] — 2026-05-16 · fix · 修复账号启停与紧急停用
+
+### Fixed
+- 账号暂停现在会通过 supervisor 真正停止对应 worker，不再只写 DB 状态或仅发送 worker 自己可能收不到的 pause 消息。
+- 账号恢复现在会通过 supervisor 直接拉起对应 worker；kill switch 开启期间不会误拉起 worker。
+- 全局紧急停用现在会停止当前所有 worker，并阻止 active 账号在总闸开启期间被自动拉起；解除后自动恢复 active 账号 worker。
+- 更新紧急停用相关前端文案，从“暂停”改为“停止”，与实际控制语义一致。
+
+### Verification
+- `git diff --check` 通过。
+- `backend/.venv/bin/ruff check backend/app` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telebot_pycache backend/.venv/bin/python -m py_compile backend/app/services/account_service.py backend/app/worker/supervisor.py backend/app/api/rate_limit.py backend/app/__init__.py` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telebot_pycache backend/.venv/bin/python -m pytest backend/app/tests/test_account_service.py backend/app/tests/test_kill_switch_supervisor.py backend/app/tests/test_system_health.py` 通过（25 passed，1 个 Alembic 配置弃用警告）。
+- `pnpm --dir frontend exec tsc -b --noEmit` 通过。
+- `pnpm --dir frontend build` 通过。
+
+---
+
+## [0.14.12] — 2026-05-16 · fix · 修复命令前缀预览
+
+### Fixed
+- 修复设置页命令前缀触发预览的 JSX 语法错误，恢复三段式 Telegram 对话预览。
+- 预览中补齐“被回复原文 → 用户触发命令 → AI 回复结果”的顺序，并在回复标题中展示当前命令前缀。
+
+### Verification
+- `pnpm --dir frontend exec tsc -b --noEmit` 通过。
+- `pnpm --dir frontend build` 通过。
+
+---
+
+## [0.14.11] — 2026-05-16 · polish · 资源占用与新手引导细化
+
+### Changed
+- 概览页资源占用改为突出展示 TeleBot 本项目合计 CPU / 内存，并补充主进程、worker、整机资源对照。
+- 命令前缀触发预览限制为略大于手机屏幕的宽度，让 Telegram 对话示例更接近真实手机观感。
+- 设置页“猜你想要？”里的“绑定机器人”改为点击后再选择账号；只有一个账号时直接进入该账号 Bot 联动页。
+- 新手指引小条统一补充“点击展开详情”，并修复第一步“新增账号”和第二步“保存”按钮文字可见性。
+- 插件中心“账号视角”改为“选择配置的账号”，并移入“账号插件启用详情与配置”容器。
+
+### Verification
+- `git diff --check` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telebot_pycache backend/.venv/bin/python -m py_compile backend/app/__init__.py` 通过。
+- `pnpm --dir frontend exec tsc -b --noEmit` 通过。
+- `pnpm --dir frontend build` 通过。
+
+---
+
+## [0.14.10] — 2026-05-16 · patch · 完成 B2 下沉与文档同步
+
+### Changed
+- 新手指引的 Siri 流光高亮改为细外框跑马灯，不再把整个按钮或卡片填成彩色，避免遮挡按钮文字。
+- `codex_image` 从 builtin 物理下沉到 `plugins/installed/codex_image/`，builtin registry 不再自动包含它；旧账号已启用时会按 installed 兼容模式加载，缺少本地代码时进入 failed 并写 runtime log。
+- `codex_image` dry-run import 改为 installed 路径，并补齐 installed 插件元数据与 `send_file` 权限声明。
+- 前端真实移动 Settings / Features 旧实现文件到 Plugins / AI 目录，减少“新入口壳页面继续引用旧目录”的双维护状态。
+- README 与插件开发文档同步 0.14 当前状态，明确 TelePilot 完整 rename 仍属于后续 0.15。
+
+### Verification
+- `git diff --check` 通过。
+- `backend/.venv/bin/ruff check backend/app` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telebot_pycache backend/.venv/bin/python -m py_compile backend/app/worker/plugins/loader.py backend/app/api/rules.py backend/app/tests/test_codex_image_errors.py backend/app/tests/test_feature_registry.py plugins/installed/codex_image/__init__.py plugins/installed/codex_image/manifest.py plugins/installed/codex_image/plugin.py` 通过。
+- `pnpm --dir frontend exec tsc -b --noEmit` 通过。
+- `pnpm --dir frontend build` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telebot_pycache backend/.venv/bin/python -m pytest backend/app/tests/test_codex_image_errors.py backend/app/tests/test_plugin_loader.py backend/app/tests/test_feature_registry.py backend/app/tests/test_feature_service.py` 通过，38 passed。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telebot_pycache backend/.venv/bin/python -m pytest backend` 通过，551 passed, 2 skipped。
+
+---
+
+## [0.14.9] — 2026-05-16 · polish · 新手指引开关与流光高亮
+
+### Changed
+- 账号页“新手指引”恢复为带文字的大按钮，点击后先询问是否开始指引模式，不再默认强制开启。
+- 第一阶段的小条提醒恢复到“新增账号”按钮附近，并改为浮层定位，展开后不再把账号卡片向下挤压。
+- 新手指引通过 `guide=1` 显式进入指引模式；未开启时不显示步骤提示，也不高亮按钮。
+- 高亮效果从普通呼吸动画改成类似 Siri 的七彩流光边框，应用于当前步骤的目标按钮和插件状态区域。
+
+### Verification
+- `git diff --check` 通过。
+- `pnpm --dir frontend build` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telebot_pycache backend/.venv/bin/python -m py_compile backend/app/__init__.py` 通过。
+
+---
+
+## [0.14.8] — 2026-05-16 · polish · 插件中心第三步指引
+
+### Changed
+- 新手指引不再首次进入账号页时强制弹窗，改为原“新手指引”按钮位置的小星星开关，需要时再展开。
+- 插件中心第三步同时高亮“命令模板”“插件启用状态网格”“安装插件”三处，并补充 A/B/C 三点说明。
+- 新手指引最后一步按钮从“跳过这步”改为“我学会了！”，更符合已到最后一步的语义。
+- 插件安装页的新手指引完成按钮同样改为“我学会了！”。
+
+### Verification
+- `git diff --check` 通过。
+- `pnpm --dir frontend build` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telebot_pycache backend/.venv/bin/python -m py_compile backend/app/__init__.py` 通过。
+
+---
+
+## [0.14.7] — 2026-05-16 · polish · 设置快捷入口与新手指引贴边
+
+### Changed
+- 系统设置顶部“已搬家”改为“猜你想要？”，提供“添加模型 / 添加命令 / 绑定机器人”三个直接入口；绑定机器人支持先选择账号再进入对应账号的 Bot 联动页。
+- 命令前缀触发预览收窄 Telegram 对话气泡宽度，回复引用块改为内容自适应，避免像整页通知卡片。
+- 新手指引从左下角悬浮改为贴近当前操作按钮：账号页靠近“新增账号”，设置页靠近“保存前缀”，插件页靠近“安装插件”，并为目标按钮增加呼吸提示。
+- 新手指引补充“跳过这步”，可以直接进入下一步所在页面；最后一步可结束指引。
+- 插件中心首页文案继续收敛为“沉淀模板 → 按账号复用 → 新账号免重配”的表达，并明确远程插件安装后回插件中心按账号启用和配置。
+
+### Verification
+- `git diff --check` 通过。
+- `pnpm --dir frontend build` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telebot_pycache backend/.venv/bin/python -m py_compile backend/app/__init__.py` 通过。
+
+---
+
+## [0.14.6] — 2026-05-16 · polish · 新手指引与 AI 用量增强
+
+### Added
+- 系统设置的“命令前缀”下新增 Telegram 左右气泡预览，展示“回复原文 → 发出命令 → AI 返回结果”的真实触发感。
+- 新手指引升级为三步：添加并启用账号、设置命令前缀、启用命令模板或调用插件，并在账号 / 设置 / 插件页面提供左下角呼吸悬浮入口。
+- AI 最近调用增加摘要卡片，展示请求数、成功数、失败数、Fallback 次数、总 Token 与平均耗时。
+
+### Changed
+- 插件安装页移除重复的“按账号启用”Tab，安装页只负责安装 / 更新 / 卸载，账号级启用和配置统一回插件中心首页。
+- 插件安装页补充“返回上一页”，深链进入时可回到插件中心。
+- AI 最近调用表格改为中文表头，并补充 fallback / 错误类型信息。
+
+### Verification
+- `git diff --check` 通过。
+- `pnpm --dir frontend build` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telebot_pycache backend/.venv/bin/python -m py_compile backend/app/api/llm_usage.py backend/app/main.py` 通过。
+
+---
+
+## [0.14.5] — 2026-05-16 · fix · 恢复远程插件安装入口
+
+### Added
+- Plugins 中心新增“安装插件”入口，统一进入 `/plugins/manage?tab=plugins` 管理 Git 仓库、远程插件安装、更新、启用、禁用和卸载。
+- 新增 `/api/llm/usage/recent`，AI 中心“最近调用”可直接读取 `llm_usage` 表，不再停留在接口预留空态。
+
+### Changed
+- 0.13 安全迁移提示里的远程插件运维入口改为“前往插件安装”，补齐 Telegram 高危插件命令移除后的 Web 替代路径。
+- 插件安装与管理页默认停留在“安装与更新”Tab，并用更明确的中文说明远程插件安装后还需要按账号启用。
+- AI Usage 表格补充来源、模型提供商名称、耗时和 fallback 状态，便于验证命令 / scheduler 的 LLM 调用。
+
+### Verification
+- `git diff --check` 通过。
+- `pnpm --dir frontend build` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telebot_pycache backend/.venv/bin/python -m py_compile backend/app/api/llm_usage.py backend/app/main.py` 通过。
+
+---
+
+## [0.14.4] — 2026-05-16 · polish · 两步新账号指引
+
+### Changed
+- 新手指引简化为“添加并启用账号 / 启用命令模板或调用插件”两大步，一次只聚焦当前要做的事。
+- 新手指引第二步补充命令前缀入口，明确先去插件中心复用模板或开启插件，再到系统设置确认 TG 内命令前缀。
+- 账号详情“新账号下一步”三张卡片标题放大加粗，让新账号配置入口更醒目。
+
+### Verification
+- `git diff --check` 通过。
+- `pnpm --dir frontend build` 通过。
+
+---
+
+## [0.14.3] — 2026-05-16 · polish · 插件中心文案与逐步新手引导
+
+### Changed
+- 插件中心顶部说明改为更自然的大白话：强调“把常用回复、转发、AI 命令整理成模板，再按账号启用复用”。
+- 插件中心三入口（命令模板 / 命令别名 / 定时任务）改为更稳健的自适应卡片布局，优化小屏与中等宽度下的长文显示，避免文案挤压。
+- 账号详情“新账号下一步”的启用插件数量挪到卡片右上角，让三张卡片按钮位置更统一。
+- 新手指引改为逐步式流程：一次聚焦一步，支持上一步 / 下一步 / 去执行当前步骤，不再一次性展示全部四步。
+
+### Verification
+- `pnpm --dir frontend build` 通过。
+
+---
+
+## [0.14.2] — 2026-05-16 · polish · 新账号引导与 AI 中心再收敛
+
+### Changed
+- AI 中心将“模型提供商”和“最近调用”整合为同页 Tab，AI 帮助缩小为顶部按钮入口，减少首页卡片重复感。
+- 插件中心统一“定时任务”命名，替换原“调度中心”文案；入口描述改成“模板可跨账号复用”的大白话说明。
+- 账号详情“快捷入口”改为“新账号下一步”，明确它用于新账号复用模板、开启插件、复制成熟配置。
+- 账号管理页新增“新手指引”按钮，并首次进入自动弹出 4 步引导动画，可随时从顶部按钮再次打开。
+
+### Verification
+- `pnpm --dir frontend build` 通过。
+
+---
+
+## [0.14.1] — 2026-05-16 · fix · 前端 IA 追补与资源展示修正
+
+### Changed
+- 调整 AI 中心首页文案：将“路由策略”卡片改为“AI 帮助”，说明聚焦“工作原理 / 术语速查 / 推荐配置”，避免与“模型提供商”入口语义重叠。
+- 调整 `/ai/help` 页面定位与标题文案为“AI 帮助”，移除重复的“模型提供商列表”Tab，仅保留“工作原理”“术语速查”“推荐配置”三个 Tab。
+- Dashboard 资源占用从“主进程 CPU / 主进程内存”改为“项目 CPU / 项目内存”，统计口径改为 FastAPI 主进程 + 全部账号 worker 子进程合计。
+- 账号详情概览将“能力与迁移入口”改为“快捷入口”，用大白话说明它用于跳转到插件、命令模板和配置复制。
+- 账号详情页移除过渡性质的“命令”Tab，命令管理统一从 `/plugins/templates?account=:aid` 进入。
+
+### Verification
+- `backend/.venv/bin/python -m pytest -q backend/app/tests/test_system_health.py` 通过：17 passed。
+- `pnpm --dir frontend build` 通过。
+
+---
+
+## [0.14.0] — 2026-05-16 · feature · 前端 IA 中心化
+
+### Changed
+- 前端顶层导航从 8 个入口收敛为 6 个用户目标导向入口：概览、账号、插件、AI、日志、系统；调度与模板不再占据顶层菜单，为后续 Plugins 中心化做路由落点。
+- 新增 Plugins 中心页，将平台能力、内置插件、远程插件、实验性能力分区展示；`codex_image` 固定进入实验性区，让 0.13 的 experimental 标识在前端更显眼。
+- 将命令模板、别名、调度能力接入 `/plugins/templates`、`/plugins/aliases`、`/plugins/scheduler`，并保留旧入口重定向，避免旧书签失效。
+- 新增 AI 顶级入口 `/ai`，拆出 Provider、Routing、Usage 三个子入口；Usage 页以最小表格展示最近调用，并在后端接口尚未开放时提供温和空状态。
+- Settings 瘦身为账号、平台、安全、迁移四组，隐藏 LLM Providers、命令模板、别名管理旧入口，并提供“已搬家”跳转提示。
+- 账号详情概览增加能力与迁移入口卡片：启用插件数、启用命令数、复制配置；旧命令 Tab 降级为迁移提示页。
+- Config Bundle 支持从 `/settings?tab=backup&source=:aid` 预填源账号；Plugins 支持 `/plugins?account=:aid` 按账号视角打开。
+- Logs 页新增 Runtime / Audit 顶层 Tab，Audit 接入 `/api/logs/audit` 并支持动态 action 过滤，便于查看 sudo、Config Bundle confirm、account_bot confirm 等安全决策记录。
+- 命令模板新增 AI provider 空态引导：没有 Provider 时禁用 AI 类型创建并跳转到 `/ai/providers`；已删除 Provider 的 AI 模板会显示“provider 缺失”警告。
+- Plugins 首页增加一次性安全迁移 banner，提示 0.13 已移除 `,reboot`、`,plugin install` 等 Telegram 内高危命令；account_bot 配置页补充危险操作二次确认提示。
+- 移动端新增 4 项底部 Tab Bar（概览、账号、插件、日志），AI 与系统设置保留在汉堡菜单；账号详情 Tabs 在窄屏改为横向滚动，避免挤压重叠。
+- 收敛专属插件配置页入口：`FEATURE_CONFIG_PAGE_KEYS` 改由 `frontend/src/pages/Plugins/_shared/featureConfig.ts` 统一维护，减少账号详情与旧插件中心双份维护。
+- B5 清理 legacy feature key：移除已无引用的 `FEATURE_LEGACY_KEYS` 导出，并补充 registry 测试确保 `group_admin` / `monitor` 不会回到内置功能列表。
+- B2/F9 先落地 `codex_image` 下沉兼容检测：暂不做物理迁移；若旧账号启用但运行节点缺实现，worker 会记录 runtime_log、标记 failed，Plugins 页显示恢复提示。
+- 移除旧前端 URL 兼容重定向：`/scheduler`、`/templates`、`/settings/commands`、`/settings/aliases`、`/settings/llm-providers`、`/ai-settings`、`/matrix`、`/extensions`、`/remote-plugins` 不再作为入口保留，统一从 `/plugins/*`、`/ai/*`、`/settings` 进入。
+- 补齐新入口的中文文案与返回体验：AI / Plugins 子页增加“返回上一页”，从菜单点击进入时返回点击前页面，直接打开深链时回到对应中心页。
+- README 与插件开发指南同步 0.14 IA、共享 feature config helper、Audit 日志和 `codex_image` 兼容策略说明。
+
+### Verification
+- `pnpm --dir frontend build` 通过。
+
+---
+
 ## [0.13.1] — 2026-05-16 · fix · 本地启动与 0.13 可见性修复
 
 ### Fixed

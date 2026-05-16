@@ -20,9 +20,27 @@ async def test_post_without_csrf_header_rejected() -> None:
 async def test_post_with_csrf_header_allowed() -> None:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.post("/api/auth/logout", headers={"X-Requested-With": "telepilot-ui"})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_post_with_legacy_csrf_header_allowed() -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
         r = await c.post("/api/auth/logout", headers={"X-Requested-With": "telebot-ui"})
     assert r.status_code == 200
     assert r.json() == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_post_with_unknown_csrf_header_rejected() -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.post("/api/auth/logout", headers={"X-Requested-With": "random-ui"})
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "CSRF_HEADER_REQUIRED"
 
 
 @pytest.mark.asyncio

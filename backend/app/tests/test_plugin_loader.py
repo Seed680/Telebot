@@ -27,10 +27,13 @@ from app.worker.plugins.loader import (
     _BUILTIN_MODULES,
     _clear_installed_module_cache,
     _import_builtins,
+    _manifest_compatible,
+    _missing_plugin_error,
     _parse_prefixed_command,
     load_plugins_for_account,
     reload_account_config,
 )
+from app.worker.plugins.manifest import Manifest
 
 
 # ─────────────────────────────────────────────────────
@@ -234,6 +237,41 @@ def test_clear_installed_module_cache_removes_pycache(monkeypatch, tmp_path) -> 
 def test_parse_prefixed_command_accepts_unicode_prefix() -> None:
     assert _parse_prefixed_command("。cy 100", "。") == ("cy", ["100"])
     assert _parse_prefixed_command(",cy 100", "。") is None
+
+
+def test_missing_plugin_error_uses_codex_image_migration_hint() -> None:
+    err, message = _missing_plugin_error("codex_image")
+    assert "codex_image" in err
+    assert "下沉" in message or "installed" in message
+
+
+def test_manifest_min_telepilot_version_is_preferred() -> None:
+    manifest = Manifest(
+        key="_test_version",
+        display_name="版本测试",
+        min_telepilot_version="999.0.0",
+        min_telebot_version="0.1.0",
+    )
+
+    ok, reason = _manifest_compatible(manifest)
+
+    assert ok is False
+    assert reason is not None
+    assert "TelePilot >= 999.0.0" in reason
+
+
+def test_manifest_min_telebot_version_kept_as_legacy_alias() -> None:
+    manifest = Manifest(
+        key="_test_legacy_version",
+        display_name="旧字段版本测试",
+        min_telebot_version="999.0.0",
+    )
+
+    ok, reason = _manifest_compatible(manifest)
+
+    assert ok is False
+    assert reason is not None
+    assert "TelePilot >= 999.0.0" in reason
 
 
 @pytest.mark.asyncio

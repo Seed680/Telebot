@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "telebot-backend"
-version = "0.13.1"
-description = "Telegram Userbot 管理系统后端"
+name = "telepilot-backend"
+version = "0.15.0"
+description = "TelePilot后端"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 dependencies = [

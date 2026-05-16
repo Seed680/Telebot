@@ -68,7 +68,7 @@ export function TopBar({ username, onMenuClick }: TopBarProps) {
           <Menu className="h-5 w-5" />
         </Button>
         <div className="hidden truncate text-sm text-muted-foreground sm:block">
-          Telegram Userbot 管理控制台
+          TelePilot 管理控制台
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-1 sm:gap-2">

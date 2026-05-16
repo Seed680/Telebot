@@ -10,7 +10,8 @@ import {
 export type Theme = "light" | "dark" | "system";
 export type ResolvedTheme = "light" | "dark";
 
-const THEME_STORAGE_KEY = "telebot-theme";
+const THEME_STORAGE_KEY = "telepilot-theme";
+const LEGACY_THEME_STORAGE_KEY = "telebot-theme";
 const LIGHT_THEME_COLOR = "#2563eb";
 const DARK_THEME_COLOR = "#0b1120";
 
@@ -49,7 +50,15 @@ function applyResolvedTheme(resolvedTheme: ResolvedTheme) {
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(() => {
     if (typeof window === "undefined") return "system";
-    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY)
+      || window.localStorage.getItem(LEGACY_THEME_STORAGE_KEY);
+    if (isTheme(stored)) {
+      try {
+        window.localStorage.setItem(THEME_STORAGE_KEY, stored);
+      } catch {
+        // 浏览器隐私模式下 localStorage 可能不可写；读取到的旧主题仍可用于本次会话。
+      }
+    }
     return isTheme(stored) ? stored : "system";
   });
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => resolveTheme(theme));
@@ -82,6 +91,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     setThemeState(nextTheme);
     try {
       window.localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+      window.localStorage.removeItem(LEGACY_THEME_STORAGE_KEY);
     } catch {
       // 浏览器隐私模式下 localStorage 可能不可写；本次会话仍保持主题切换。
     }

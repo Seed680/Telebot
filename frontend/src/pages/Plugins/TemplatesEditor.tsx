@@ -8,6 +8,7 @@ import React, { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Plus, Trash2, Edit3 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -348,7 +349,7 @@ function buildPayload(form: FormState): {
   // ai
   const pid = Number(form.ai_provider_id);
   if (!Number.isInteger(pid) || pid <= 0)
-    return { ok: false, errMsg: "AI 类型必须选 LLM Provider" };
+    return { ok: false, errMsg: "AI 类型必须选择模型提供商" };
   const mt = form.ai_max_tokens.trim();
   const cfg: Record<string, unknown> = {
     provider_id: pid,
@@ -363,13 +364,13 @@ function buildPayload(form: FormState): {
     if (form.ai_routing_fallback_provider_id.trim()) {
       const fb = Number(form.ai_routing_fallback_provider_id);
       if (!Number.isInteger(fb) || fb <= 0)
-        return { ok: false, errMsg: "兜底 provider 必须是有效 LLM Provider" };
+        return { ok: false, errMsg: "兜底模型提供商必须有效" };
       cfg.routing_fallback_provider_id = fb;
     }
     if (form.ai_classifier_provider_id.trim()) {
       const cls = Number(form.ai_classifier_provider_id);
       if (!Number.isInteger(cls) || cls <= 0)
-        return { ok: false, errMsg: "分类器 provider 必须是有效 LLM Provider" };
+        return { ok: false, errMsg: "分类器模型提供商必须有效" };
       cfg.classifier_provider_id = cls;
     }
   }
@@ -390,10 +391,15 @@ function buildPayload(form: FormState): {
 }
 
 export function CommandTemplates() {
+  const nav = useNavigate();
   const qc = useQueryClient();
   const listQ = useQuery({
     queryKey: ["cmd-tpl"],
     queryFn: listCommandTemplates,
+  });
+  const providersQ = useQuery({
+    queryKey: ["llm-providers"],
+    queryFn: listLLMProviders,
   });
   // 实时拉系统命令前缀，用在编辑器的"`,name` 触发"那行提示——避免硬编码逗号
   // 跟系统设置改了不一致
@@ -402,6 +408,12 @@ export function CommandTemplates() {
     queryFn: getSystemSettings,
   });
   const cmdPrefix = settingsQ.data?.command_prefix || ",";
+  const providerIds = useMemo(
+    () => new Set((providersQ.data || []).map((p) => p.id)),
+    [providersQ.data],
+  );
+  const hasProviders = (providersQ.data?.length || 0) > 0;
+  const providerUnavailable = providersQ.isSuccess && !hasProviders;
 
   const [editing, setEditing] = useState<FormState | null>(null);
 
@@ -473,6 +485,19 @@ export function CommandTemplates() {
           </div>
         </CardHeader>
         <CardContent>
+          {providerUnavailable ? (
+            <div className="mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              AI 命令模板不可用：先去 AI 中心添加模型提供商。
+              <Button
+                type="button"
+                variant="link"
+                className="h-auto px-1 py-0 text-xs"
+                onClick={() => nav("/ai/providers")}
+              >
+                前往模型提供商
+              </Button>
+            </div>
+          ) : null}
           {listQ.isLoading ? (
             <div className="flex h-20 items-center justify-center">
               <Spinner className="text-primary" />
@@ -493,7 +518,15 @@ export function CommandTemplates() {
                   <TableRow key={t.id}>
                     <TableCell className="font-mono text-sm">{cmdPrefix}{t.name}</TableCell>
                     <TableCell>
-                      <Badge variant="secondary">{TYPE_LABELS[t.type] || t.type}</Badge>
+                      <div className="flex flex-wrap items-center gap-1">
+                        <Badge variant="secondary">{TYPE_LABELS[t.type] || t.type}</Badge>
+                        {t.type === "ai" &&
+                        providersQ.isSuccess &&
+                        typeof t.config?.provider_id === "number" &&
+                        !providerIds.has(t.config.provider_id) ? (
+                          <Badge variant="destructive">模型提供商缺失</Badge>
+                        ) : null}
+                      </div>
                     </TableCell>
                     <TableCell className="max-w-[260px]">
                       <div className="flex flex-wrap gap-1">
@@ -559,6 +592,10 @@ export function CommandTemplates() {
                 toast.error("命令名只能包含字母 / 数字 / 下划线，1-64 字符");
                 return;
               }
+              if (editing.type === "ai" && providerUnavailable) {
+                toast.error("先去 AI 中心添加模型提供商");
+                return;
+              }
               if (editing.id) {
                 updateMut.mutate(editing);
               } else {
@@ -566,6 +603,9 @@ export function CommandTemplates() {
               }
             }}
             saving={createMut.isPending || updateMut.isPending}
+            hasProviders={hasProviders}
+            providerUnavailable={providerUnavailable}
+            onGoProviders={() => nav("/ai/providers")}
           />
         )}
       </Card>
@@ -632,6 +672,9 @@ function CommandEditDialog({
   onCancel,
   onSave,
   saving,
+  hasProviders,
+  providerUnavailable,
+  onGoProviders,
 }: {
   form: FormState;
   cmdPrefix: string;
@@ -639,6 +682,9 @@ function CommandEditDialog({
   onCancel: () => void;
   onSave: () => void;
   saving: boolean;
+  hasProviders: boolean;
+  providerUnavailable: boolean;
+  onGoProviders: () => void;
 }) {
   const isEdit = !!form.id;
   const setField = <K extends keyof FormState>(k: K, v: FormState[K]) =>
@@ -695,11 +741,24 @@ function CommandEditDialog({
                 }
               >
                 {typeOptions.map(([k, label]) => (
-                  <option key={k} value={k}>
+                  <option key={k} value={k} disabled={k === "ai" && providerUnavailable}>
                     {label}（{k}）
                   </option>
                 ))}
               </Select>
+              {providerUnavailable ? (
+                <p className="text-xs text-amber-700">
+                  AI 类型暂不可选，先去 AI 中心添加模型提供商。
+                  <Button
+                    type="button"
+                    variant="link"
+                    className="h-auto px-1 py-0 text-xs"
+                    onClick={onGoProviders}
+                  >
+                    前往模型提供商
+                  </Button>
+                </p>
+              ) : null}
             </div>
           </div>
 
@@ -876,7 +935,7 @@ function CommandEditDialog({
                 />
                 <p className="text-xs text-muted-foreground">
                   下拉里每条 = 一个已启用的 (提供商 × 模型) 组合。要新增/启用模型去
-                  <span className="mx-1 font-medium">AI 设置 → 模型提供商</span>编辑。
+                  <span className="mx-1 font-medium">AI 中心 → 模型提供商</span>编辑。
                   {form.ai_routing_mode === "auto"
                     ? " auto 模式下，规则未命中且未设独立兜底时走这条"
                     : ""}
@@ -1002,7 +1061,7 @@ function CommandEditDialog({
                 {form.ai_routing_mode === "auto" && (
                   <div className="space-y-3">
                     <div className="space-y-1.5">
-                      <Label>独立兜底 provider（可选）</Label>
+                      <Label>独立兜底模型提供商（可选）</Label>
                       <ProviderSelect
                         value={form.ai_routing_fallback_provider_id}
                         providers={providersQ.data}
@@ -1013,11 +1072,11 @@ function CommandEditDialog({
                         allowEmpty
                       />
                       <p className="text-xs text-muted-foreground">
-                        留空 = 直接复用上面那条「默认 / 兜底 LLM Provider」；想分开就在这选另一条
+                        留空 = 直接复用上面那条「默认 / 兜底模型提供商」；想分开就在这选另一条
                       </p>
                     </div>
                     <div className="space-y-1.5">
-                      <Label>分类器 provider（可选）</Label>
+                      <Label>分类器模型提供商（可选）</Label>
                       <ProviderSelect
                         value={form.ai_classifier_provider_id}
                         providers={providersQ.data}
@@ -1090,7 +1149,7 @@ function ProviderSelect({
   if (!providers || providers.length === 0) {
     return (
       <div className="rounded-md border px-3 py-2 text-xs alert-warning">
-        尚未配置 Provider。先到「AI 设置 → 模型提供商」新建一个
+        尚未配置模型提供商。先到「AI 中心 → 模型提供商」新建一个
       </div>
     );
   }
@@ -1141,7 +1200,7 @@ function ProviderModelSelect({
   if (!providers || providers.length === 0) {
     return (
       <div className="rounded-md border px-3 py-2 text-xs alert-warning">
-        尚未配置模型提供商。先到「AI 设置」新建一个，并在编辑里 Fetch + 启用至少一个模型
+        尚未配置模型提供商。先到「AI 中心」新建一个，并在编辑里拉取并启用至少一个模型
       </div>
     );
   }
@@ -1196,7 +1255,7 @@ function ProviderModelSelect({
   if (rows.length === 0) {
     return (
       <div className="rounded-md border px-3 py-2 text-xs alert-warning">
-        所有提供商都没启用任何模型。在「AI 设置」编辑某个提供商，启用至少一条模型再来
+        所有提供商都没启用任何模型。在「AI 中心」编辑某个提供商，启用至少一条模型再来
       </div>
     );
   }

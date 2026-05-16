@@ -40,10 +40,11 @@ from typing import Any
 from sqlalchemy import select, update
 from telethon import TelegramClient, events
 
-from ... import __version__ as TELEBOT_VERSION
+from ... import __version__ as TELEPILOT_VERSION
 from ...db.base import AsyncSessionLocal
 from ...db.models.account import Account, HumanizeConfig, SudoUser
 from ...db.models.feature import (
+    FEATURE_CODEX_IMAGE,
     FEATURE_SCHEDULER,
     FEATURE_STATE_ACTIVE,
     FEATURE_STATE_DISABLED,
@@ -146,6 +147,20 @@ def _builtin_plugin_path(plugin_key: str) -> Path | None:
     return path if path.is_dir() else None
 
 
+def _missing_plugin_error(feature_key: str) -> tuple[str, str]:
+    """为缺失插件提供统一错误码与可读日志，便于前端/运维识别。"""
+    if feature_key == "codex_image":
+        return (
+            "plugin codex_image not found (possible migration to installed plugin)",
+            (
+                "feature codex_image 已启用但本地未找到插件实现。"
+                "这通常是 codex_image 下沉到 installed 后代码未就位；"
+                "已跳过加载并保持 worker 运行。"
+            ),
+        )
+    return ("plugin not found", f"feature {feature_key} 已启用但未找到插件实现")
+
+
 def _import_builtins() -> None:
     """import 内置插件包，触发各模块的 ``@register`` 装饰器写入注册表。
 
@@ -167,7 +182,7 @@ def _import_builtins() -> None:
 
 
 def _installed_module_name(plugin_key: str) -> str:
-    return f"_telebot_installed_plugin_{plugin_key}"
+    return f"_telepilot_installed_plugin_{plugin_key}"
 
 
 def _clear_installed_module_cache(plugin_key: str) -> None:
@@ -213,9 +228,12 @@ def _version_tuple(v: str | None) -> tuple[int, ...]:
 
 def _manifest_compatible(manifest: Manifest) -> tuple[bool, str | None]:
     """检查 manifest 的版本和插件依赖声明。"""
-    min_version = getattr(manifest, "min_telebot_version", None)
-    if min_version and _version_tuple(TELEBOT_VERSION) < _version_tuple(min_version):
-        return False, f"需要 telebot >= {min_version}，当前 {TELEBOT_VERSION}"
+    min_version = (
+        getattr(manifest, "min_telepilot_version", None)
+        or getattr(manifest, "min_telebot_version", None)
+    )
+    if min_version and _version_tuple(TELEPILOT_VERSION) < _version_tuple(min_version):
+        return False, f"需要 TelePilot >= {min_version}，当前 {TELEPILOT_VERSION}"
 
     missing = [
         key for key in list(getattr(manifest, "requires_features", None) or [])
@@ -337,6 +355,27 @@ def _load_installed_plugin(plugin_key: str) -> dict[str, type[Plugin]]:
         )
         path = legacy_path
     return _load_dir(path, source="installed")
+
+
+def _installed_plugin_exists(plugin_key: str) -> bool:
+    """判断 installed 插件目录是否存在；仅用于兼容旧 account_feature 行。"""
+    if not _is_safe_plugin_key(plugin_key):
+        return False
+    root = _installed_dir().resolve()
+    path = (root / plugin_key).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    if path.is_dir():
+        return True
+    legacy_root = (_BACKEND_DIR / "plugins" / "installed").resolve()
+    legacy_path = (legacy_root / plugin_key).resolve()
+    try:
+        legacy_path.relative_to(legacy_root)
+    except ValueError:
+        return False
+    return legacy_path.is_dir()
 
 
 def _load_builtin_plugin(plugin_key: str) -> dict[str, type[Plugin]]:
@@ -726,12 +765,22 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
                 return
             _load_installed_plugin(af.feature_key)
             cls = get_plugin(af.feature_key)
+        elif af.feature_key == FEATURE_CODEX_IMAGE and _installed_plugin_exists(af.feature_key):
+            await _log(
+                redis,
+                state.account_id,
+                "info",
+                "codex_image 已下沉到 plugins/installed，以兼容模式加载旧账号配置",
+            )
+            _load_installed_plugin(af.feature_key)
+            cls = get_plugin(af.feature_key)
     if cls is None:
+        last_error, log_message = _missing_plugin_error(af.feature_key)
         await _log(
             redis,
             state.account_id,
             "warn",
-            f"feature {af.feature_key} 已启用但未找到插件实现",
+            log_message,
         )
         await db.execute(
             update(AccountFeature)
@@ -739,7 +788,7 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
                 AccountFeature.account_id == state.account_id,
                 AccountFeature.feature_key == af.feature_key,
             )
-            .values(state=FEATURE_STATE_FAILED, last_error="plugin not found")
+            .values(state=FEATURE_STATE_FAILED, last_error=last_error)
         )
         await db.commit()
         return
@@ -754,15 +803,25 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
             )
         ).scalar_one_or_none()
         if rp is None:
-            await _log(
-                redis,
-                state.account_id,
-                "warn",
-                f"feature {af.feature_key} 是 installed 插件但 remote_plugin 行不存在",
-            )
-            return
-        if not rp.enabled:
-            # RemotePlugin.enabled=False 时跳过加载（DB 状态已是 disabled）
+            if af.feature_key == FEATURE_CODEX_IMAGE:
+                await _log(
+                    redis,
+                    state.account_id,
+                    "info",
+                    "codex_image installed 代码已就位但 remote_plugin 行不存在；按内置下沉兼容模式继续加载",
+                )
+                rp = None
+            else:
+                await _log(
+                    redis,
+                    state.account_id,
+                    "warn",
+                    f"feature {af.feature_key} 是 installed 插件但 remote_plugin 行不存在",
+                )
+                return
+        if rp is None:
+            pass
+        elif not rp.enabled:
             await _log(
                 redis,
                 state.account_id,

@@ -1,4 +1,4 @@
-# TeleBot 插件开发指南
+# TelePilot 插件开发指南
 
 > 本文档涵盖插件开发全流程：本地插件、远程插件、框架约束、调试建议。
 
@@ -264,7 +264,8 @@ class PluginContext:
 | `permissions` | list | 权限声明，默认 `["send_message", "edit_message", "read_chat"]` |
 | `config_schema` | dict | JSON Schema，有配置的插件必须写 |
 | `requires_features` | list | 依赖的其他插件 key |
-| `min_telebot_version` | str | 最低 TeleBot 版本要求，远程插件建议填写 |
+| `min_telepilot_version` | str | 最低 TelePilot 版本要求，远程插件建议填写 |
+| `min_telebot_version` | str | 旧字段名，0.15 起仅作为兼容别名保留，新插件不要再新增 |
 
 ### 完整示例
 
@@ -465,7 +466,7 @@ except ConversationTimeout:
 
 ## 9. 插件日志
 
-插件日志会进入后台的“日志中心 → 插件日志”分页，和“消息日志”“系统日志”分开显示。
+插件日志会进入后台的“日志中心 → Runtime → 插件日志”分页，和“消息日志”“系统日志”分开显示；涉及 sudo、Config Bundle confirm、account_bot confirm 等安全决策的记录则在“日志中心 → Audit”查看。
 
 ### 如何写日志
 
@@ -559,7 +560,7 @@ DELETE /api/remote-plugins/{name}
   "author": "community",
   "version": "1.0.0",
   "entry": "plugin.py",
-  "min_telebot_version": "0.9.0",
+  "min_telepilot_version": "0.15.0",
   "commands": ["weather", "w"],
   "cleanup_mode": "no-op",
   "tags": ["weather", "utility"],
@@ -722,10 +723,10 @@ config_schema={
 | # | 文件 | 修改内容 |
 |---|------|---------|
 | 1 | `frontend/src/api/types.ts` | 添加 `XxxRuleConfig` 接口（描述单条规则的 config 字段） |
-| 2 | `frontend/src/pages/Features/XxxConfig.tsx` | **新建**：规则列表页（参考 `AutoReply.tsx` 或 `Forward.tsx`） |
+| 2 | `frontend/src/pages/Plugins/configs/XxxConfig.tsx` | **新建**：规则列表页（参考 `AutoReply.tsx` 或 `Forward.tsx`） |
 | 3 | `backend/app/worker/plugins/builtin/xxx/manifest.py` | `config_schema["x-ui-mode"] = "rules"` |
 | 4 | `frontend/src/App.tsx` | ① import 新页面组件 ② 添加路由 `:aid/features/xxx` ③ 在 `FEATURE_CONFIG_PAGES` 中添加 key |
-| 5 | `frontend/src/pages/Accounts/Detail.tsx` / `frontend/src/pages/Extensions.tsx` | 在 `FEATURE_CONFIG_PAGE_KEYS` Set 中添加 key |
+| 5 | `frontend/src/pages/Plugins/_shared/featureConfig.ts` | 在共享的 `FEATURE_CONFIG_PAGE_KEYS` Set 中添加 key |
 | 6 | `backend/app/db/models/feature.py` | 添加 `FEATURE_XXX = "xxx"` 常量（如已有可跳过） |
 
 #### 1. types.ts — RuleConfig 接口
@@ -743,7 +744,7 @@ export interface AutorepeatRuleConfig {
 
 #### 2. 新建配置页面
 
-创建 `frontend/src/pages/Features/XxxConfig.tsx`，核心结构：
+创建 `frontend/src/pages/Plugins/configs/XxxConfig.tsx`，核心结构：
 
 ```tsx
 // 标准页面骨架（以 AutoReply 为模板）
@@ -793,7 +794,7 @@ config_schema={
 
 ```tsx
 // ① import
-import { XxxConfig } from "@/pages/Features/XxxConfig";
+import { XxxConfig } from "@/pages/Plugins/configs/XxxConfig";
 
 // ② 路由
 <Route path=":aid/features/xxx" element={<XxxConfig />} />
@@ -808,26 +809,19 @@ const FEATURE_CONFIG_PAGES: Record<string, { title: string; description: string 
 
 路由路径格式固定为 `:aid/features/{plugin_key}`，`plugin_key` 必须与 `MANIFEST.key` 一致。
 
-#### 5. FEATURE_CONFIG_PAGE_KEYS — 两个入口点
+#### 5. FEATURE_CONFIG_PAGE_KEYS — 共享入口点
 
-两个文件中的 `FEATURE_CONFIG_PAGE_KEYS` 必须同步添加：
+0.14.0 起，账号详情与 Plugins 中心统一复用同一个 helper，不再维护两份 Set。新增专属配置页时只改这一处：
 
 ```tsx
-// Detail.tsx（账号详情页 → 插件列表"配置"按钮）
-const FEATURE_CONFIG_PAGE_KEYS = new Set([
-  "auto_reply", "autorepeat", "forward", "game24", "codex_image",
-  "xxx",  // ← 新增
-]);
-
-// Extensions.tsx（插件中心 → 账号插件"配置"按钮）
+// frontend/src/pages/Plugins/_shared/featureConfig.ts
 const FEATURE_CONFIG_PAGE_KEYS = new Set([
   "auto_reply", "autorepeat", "forward", "game24", "codex_image",
   "xxx",  // ← 新增
 ]);
 ```
 
-**作用**：Set 中的 key 会让"配置"按钮跳转到专属页面路由 `/:aid/features/xxx`；
-不在 Set 中的 key 会弹 `ConfigDialog`（模式 C）。
+**作用**：Set 中的 key 会让账号详情和 Plugins 中心的"配置"按钮跳转到专属页面路由 `/accounts/:aid/features/xxx`；不在 Set 中的 key 会弹 `ConfigDialog`（模式 C）。
 
 #### 6. feature.py — 后端常量
 
@@ -903,7 +897,7 @@ if key == FEATURE_XXX:
 
 只有一份配置、无规则列表的插件，使用专属页面但不需要 CRUD 和 dry-run：
 
-- 创建 `frontend/src/pages/Features/XxxConfig.tsx`，直接展示/编辑单个 config 对象
+- 创建 `frontend/src/pages/Plugins/configs/XxxConfig.tsx`，直接展示/编辑单个 config 对象
 - `manifest.py` 中声明 `config_schema["x-ui-mode"] = "single"`
 - 其余适配步骤与模式 A 相同（App.tsx 路由 + FEATURE_CONFIG_PAGES + 两个 PAGE_KEYS）
 - 后端不需要 dry-run 分支
@@ -958,7 +952,7 @@ config_schema={
 
 专属页面字段应与运行时实际读取的配置保持一致；`manifest.config_schema` 也要同步，避免 ConfigDialog、接口校验和文档出现三套口径。
 
-`codex_image` 目前仍是 builtin，但会通过 `experimental` / `x-experimental` 标记在 UI 和文档中提示风险；后续若下沉为可选插件，仍需保留同一组配置键以兼容现有账号数据。
+`codex_image` 已从 builtin 下沉到 `plugins/installed/codex_image/`。全新部署不会把它作为内置能力自动 seed；旧账号若仍有 `account_feature(feature_key="codex_image")` 且本地代码存在，worker 会按 installed 兼容模式加载。若运行节点缺少代码，worker 会把该功能标记为 failed 并写入 runtime log，Plugins 页会显示恢复提示。`codex_image` 的 dry-run import 也已改为 installed 路径，避免 builtin 目录再次成为隐性依赖。
 
 ---
 
@@ -1004,7 +998,7 @@ config_schema={
 
 - `manifest.py` 声明 `config_schema["x-ui-mode"] = "platform"`
 - 前端会在账号详情和插件中心里放到“基础能力 / 平台内置”分组
-- 如果有专属页面，仍需 `App.tsx` 路由和 `FEATURE_CONFIG_PAGE_KEYS`
+- 如果有专属页面，仍需 `App.tsx` 路由和共享 `FEATURE_CONFIG_PAGE_KEYS`
 - 后端运行时由 `PlatformScheduler` 常驻初始化；调度算法与 action 执行在平台层，`scheduler` 插件壳只保留兼容入口或配置入口
 - 普通插件需要定时执行时，不要自己 `create_task` 写永久循环，优先使用 `ctx.scheduler`
 
@@ -1057,7 +1051,7 @@ class DemoPlugin(Plugin):
 
 ### 风格要求
 
-- 与 TeleBot 现有页面风格一致
+- 与 TelePilot 现有页面风格一致
 - React + TypeScript + TailwindCSS
 - 新页面参考 `AutoReply.tsx`（规则驱动）或 `Game24Config.tsx`（单配置）的代码结构
 - 表格列宽要稳定，账号详情页和插件中心的同类列表要纵向对齐
@@ -1071,7 +1065,7 @@ class DemoPlugin(Plugin):
 - [ ] `types.ts` 中 `XxxRuleConfig` 接口与 `manifest.py` config_schema 字段一致
 - [ ] 如果有专属页面：`App.tsx` 中路由路径 `:aid/features/{key}` 与插件 key 一致
 - [ ] 如果有专属页面：`App.tsx` 中 `FEATURE_CONFIG_PAGES` 包含该 key
-- [ ] 如果有专属页面：`Detail.tsx` 和 `Extensions.tsx` 的 `FEATURE_CONFIG_PAGE_KEYS` 包含该 key
+- [ ] 如果有专属页面：`frontend/src/pages/Plugins/_shared/featureConfig.ts` 的 `FEATURE_CONFIG_PAGE_KEYS` 包含该 key
 - [ ] 如果是命令型插件：`command` 字段可配置，`Plugin.command_config_keys = {"command"}`，说明文案动态读取当前命令
 - [ ] 如果是模式 B：当前状态和使用说明位于配置表单之前
 - [ ] 如需 dry-run：`plugin.py` 导出 `_dry_run_match`，`__init__.py` re-export，`rules.py` 在 fallback 之前添加分支
@@ -1093,7 +1087,7 @@ class DemoPlugin(Plugin):
 - 远程插件发布时必须同步更新所有元数据入口的版本号：`plugin.json.version`、`manifest.py` 里的 `MANIFEST.version`、Registry 索引中的 `version`。
 - `plugin.json` 是安装/更新阶段的静态来源，`manifest.py` 是运行阶段的真实 Manifest。两者版本不一致时，市场展示、配置缓存和运行日志会很难排查。
 - 需要热更新验证的插件，建议在 `on_startup` 日志和主要业务消息中暴露版本，例如 `"[quiz] 已启动 v1.2.3，指令：quiz"`。
-- 发布说明里要写清最低 TeleBot 版本、权限、依赖库、是否需要 `send_file` / `delete_message` 等敏感能力。
+- 发布说明里要写清最低 TelePilot 版本、权限、依赖库、是否需要 `send_file` / `delete_message` 等敏感能力；版本字段优先写 `min_telepilot_version`。
 
 #### 消息与交互
 
@@ -1392,7 +1386,7 @@ class RoundPlugin(Plugin):
 
 ### 奖惩系统接入约定
 
-当前 TeleBot 没有统一积分服务时，插件奖励分三类：
+当前 TelePilot 没有统一积分服务时，插件奖励分三类：
 
 | 模式 | 适用场景 | 推荐做法 |
 |------|----------|----------|
