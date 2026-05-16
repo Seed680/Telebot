@@ -40,7 +40,7 @@ from typing import Any
 from sqlalchemy import select, update
 from telethon import TelegramClient, events
 
-from ... import __version__ as TELEBOT_VERSION
+from ... import __version__ as TELEPILOT_VERSION
 from ...db.base import AsyncSessionLocal
 from ...db.models.account import Account, HumanizeConfig, SudoUser
 from ...db.models.feature import (
@@ -182,7 +182,7 @@ def _import_builtins() -> None:
 
 
 def _installed_module_name(plugin_key: str) -> str:
-    return f"_telebot_installed_plugin_{plugin_key}"
+    return f"_telepilot_installed_plugin_{plugin_key}"
 
 
 def _clear_installed_module_cache(plugin_key: str) -> None:
@@ -228,9 +228,12 @@ def _version_tuple(v: str | None) -> tuple[int, ...]:
 
 def _manifest_compatible(manifest: Manifest) -> tuple[bool, str | None]:
     """检查 manifest 的版本和插件依赖声明。"""
-    min_version = getattr(manifest, "min_telebot_version", None)
-    if min_version and _version_tuple(TELEBOT_VERSION) < _version_tuple(min_version):
-        return False, f"需要 telebot >= {min_version}，当前 {TELEBOT_VERSION}"
+    min_version = (
+        getattr(manifest, "min_telepilot_version", None)
+        or getattr(manifest, "min_telebot_version", None)
+    )
+    if min_version and _version_tuple(TELEPILOT_VERSION) < _version_tuple(min_version):
+        return False, f"需要 TelePilot >= {min_version}，当前 {TELEPILOT_VERSION}"
 
     missing = [
         key for key in list(getattr(manifest, "requires_features", None) or [])

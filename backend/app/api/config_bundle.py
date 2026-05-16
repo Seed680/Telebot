@@ -93,7 +93,7 @@ async def export_config_bundle(
     except BundleTooLarge as exc:
         raise _bad("BUNDLE_TOO_LARGE", "bundle 超过 1MB，请拆分后再导出", 413) from exc
 
-    filename = f"telebot-config-bundle-{aid}.json"
+    filename = f"telepilot-config-bundle-{aid}.json"
     return Response(
         content=body,
         media_type="application/json",

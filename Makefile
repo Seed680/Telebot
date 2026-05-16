@@ -1,4 +1,4 @@
-# Telegram Userbot 管理系统 — 项目级 Makefile
+# TelePilot — 项目级 Makefile
 # 一键命令：
 #   make up          一键开发启动（pg + redis + 后端 + 前端）★最常用
 #   make down        一键停止
@@ -55,7 +55,7 @@ down:
 
 # 改完代码后必须用这个——只重启 backend uvicorn 不会让 worker 子进程拿新代码
 # （它们是 multiprocessing.spawn 出来的独立 Python 进程，跟 uvicorn --reload 无关）。
-# restart = down（清光所有 telebot 进程，含孤儿 worker）+ up（拉新进程）。
+# restart = down（清光所有 TelePilot 进程，含孤儿 worker）+ up（拉新进程）。
 restart:
 	@./scripts/down.sh
 	@./scripts/up.sh

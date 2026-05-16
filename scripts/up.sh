@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一键开发启动：
 #   1. 检查环境（必要时自动调用 bootstrap.sh）
-#   2. **强制清理 telebot 残留进程**（防止上次留下的孤儿 worker 跑老代码）
+#   2. **强制清理 TelePilot 残留进程**（防止上次留下的孤儿 worker 跑老代码）
 #   3. 起 PostgreSQL + Redis（docker compose dev）
 #   4. 跑 alembic 迁移
 #   5. 后台启动 uvicorn（**默认关闭 --reload**，原因见下方注释）
@@ -33,22 +33,24 @@ ensure_dirs
 # ── 1. 幂等 bootstrap（首次会装依赖；后续秒过） ──────────────
 "$SCRIPT_DIR/bootstrap.sh"
 
-# ── 2. 强制清理 telebot 残留进程 ────────────────────────────
+# ── 2. 强制清理 TelePilot 残留进程 ────────────────────────────
 # 避免历史孤儿 worker（上次 uvicorn --reload 留下的、上次 make down 没清干净的）
 # 跟新 worker 抢 Redis pubsub 处理 TG 消息，跑两套不同代码导致行为飘忽。
-log "清理任何 telebot 残留 Python 进程"
-kill_orphan_telebot_workers_quiet() {
+log "清理任何 TelePilot 残留 Python 进程"
+kill_orphan_telepilot_workers_quiet() {
   local pids killed=()
   pids="$(pgrep -f 'multiprocessing.spawn' 2>/dev/null || true)"
   if [[ -z "$pids" ]]; then
     return 0
   fi
+  local backend_path="$ROOT_DIR/backend"
   local pid
   for pid in $pids; do
-    # 用 lsof 看打开的文件里有没有 telebot/backend 路径——孤儿的 cwd 被 init
+    # 用 lsof 看打开的文件里有没有当前 backend 路径——孤儿的 cwd 被 init
     # 重置成 ``/``，cwd 检测对真正的孤儿失效；但 worker 持有的 .py 文件 fd 会
-    # 一直含 telebot/backend 路径
-    if lsof -p "$pid" 2>/dev/null | grep -q "telebot/backend"; then
+    # 一直含项目 backend 路径。保留旧 telebot/backend 匹配用于迁移期清理。
+    if lsof -p "$pid" 2>/dev/null | grep -Fq "$backend_path" \
+      || lsof -p "$pid" 2>/dev/null | grep -Eq "(telebot|Telebot|telepilot|TelePilot)/backend"; then
       kill -9 "$pid" 2>/dev/null || true
       killed+=("$pid")
     fi
@@ -57,7 +59,7 @@ kill_orphan_telebot_workers_quiet() {
     warn "杀掉残留 worker: ${killed[*]}"
   fi
 }
-kill_orphan_telebot_workers_quiet
+kill_orphan_telepilot_workers_quiet
 # 兜底：把 8000/5173 端口上任何残留也清了（PID 文件可能已失效）
 for port in 8000 5173; do
   pids="$(lsof -nP -iTCP:$port -sTCP:LISTEN -t 2>/dev/null || true)"

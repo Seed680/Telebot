@@ -1,4 +1,4 @@
-# TeleBot 插件开发指南
+# TelePilot 插件开发指南
 
 > 本文档涵盖插件开发全流程：本地插件、远程插件、框架约束、调试建议。
 
@@ -264,7 +264,8 @@ class PluginContext:
 | `permissions` | list | 权限声明，默认 `["send_message", "edit_message", "read_chat"]` |
 | `config_schema` | dict | JSON Schema，有配置的插件必须写 |
 | `requires_features` | list | 依赖的其他插件 key |
-| `min_telebot_version` | str | 最低 TeleBot 版本要求，远程插件建议填写 |
+| `min_telepilot_version` | str | 最低 TelePilot 版本要求，远程插件建议填写 |
+| `min_telebot_version` | str | 旧字段名，0.15 起仅作为兼容别名保留，新插件不要再新增 |
 
 ### 完整示例
 
@@ -559,7 +560,7 @@ DELETE /api/remote-plugins/{name}
   "author": "community",
   "version": "1.0.0",
   "entry": "plugin.py",
-  "min_telebot_version": "0.9.0",
+  "min_telepilot_version": "0.15.0",
   "commands": ["weather", "w"],
   "cleanup_mode": "no-op",
   "tags": ["weather", "utility"],
@@ -1050,7 +1051,7 @@ class DemoPlugin(Plugin):
 
 ### 风格要求
 
-- 与 TeleBot 现有页面风格一致
+- 与 TelePilot 现有页面风格一致
 - React + TypeScript + TailwindCSS
 - 新页面参考 `AutoReply.tsx`（规则驱动）或 `Game24Config.tsx`（单配置）的代码结构
 - 表格列宽要稳定，账号详情页和插件中心的同类列表要纵向对齐
@@ -1086,7 +1087,7 @@ class DemoPlugin(Plugin):
 - 远程插件发布时必须同步更新所有元数据入口的版本号：`plugin.json.version`、`manifest.py` 里的 `MANIFEST.version`、Registry 索引中的 `version`。
 - `plugin.json` 是安装/更新阶段的静态来源，`manifest.py` 是运行阶段的真实 Manifest。两者版本不一致时，市场展示、配置缓存和运行日志会很难排查。
 - 需要热更新验证的插件，建议在 `on_startup` 日志和主要业务消息中暴露版本，例如 `"[quiz] 已启动 v1.2.3，指令：quiz"`。
-- 发布说明里要写清最低 TeleBot 版本、权限、依赖库、是否需要 `send_file` / `delete_message` 等敏感能力。
+- 发布说明里要写清最低 TelePilot 版本、权限、依赖库、是否需要 `send_file` / `delete_message` 等敏感能力；版本字段优先写 `min_telepilot_version`。
 
 #### 消息与交互
 
@@ -1385,7 +1386,7 @@ class RoundPlugin(Plugin):
 
 ### 奖惩系统接入约定
 
-当前 TeleBot 没有统一积分服务时，插件奖励分三类：
+当前 TelePilot 没有统一积分服务时，插件奖励分三类：
 
 | 模式 | 适用场景 | 推荐做法 |
 |------|----------|----------|

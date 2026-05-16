@@ -34,7 +34,7 @@ logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.I
 # Postgres advisory lock key（固定值，避免不同进程 key 漂移）
 _MIGRATION_ADVISORY_LOCK_KEY = 730140129
 _CSRF_HEADER_NAME = "X-Requested-With"
-_CSRF_HEADER_VALUE = "telebot-ui"
+_CSRF_HEADER_VALUES = {"telepilot-ui", "telebot-ui"}
 
 
 def _is_container_env() -> bool:
@@ -142,7 +142,7 @@ async def lifespan(app: FastAPI):
 
     # 2-D: 项目启动通知（若未配置 NotifyBot，send 会返回 False 并静默）
     try:
-        await notify_service.send(None, f"📦 telebot v{__version__} started")
+        await notify_service.send(None, f"📦 telepilot v{__version__} started")
     except Exception:  # noqa: BLE001
         logging.exception("发送启动通知失败")
 
@@ -172,7 +172,7 @@ async def lifespan(app: FastAPI):
                 logging.exception("stop_all_workers 失败")
 
 
-app = FastAPI(title="Telegram Userbot 管理系统", version=__version__, lifespan=lifespan)
+app = FastAPI(title="TelePilot", version=__version__, lifespan=lifespan)
 
 
 # ── CORS ──────────────────────────────────────────────────────────
@@ -194,7 +194,7 @@ def _csrf_required(method: str) -> bool:
 async def csrf_header_middleware(request: Request, call_next):
     if _csrf_required(request.method):
         header_val = request.headers.get(_CSRF_HEADER_NAME, "")
-        if header_val != _CSRF_HEADER_VALUE:
+        if header_val not in _CSRF_HEADER_VALUES:
             return JSONResponse(
                 status_code=403,
                 content={

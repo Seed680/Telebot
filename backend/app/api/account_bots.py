@@ -94,7 +94,7 @@ async def test_account_bot(
                 "message": "没有可发送的授权用户。请先让授权用户给这个 Bot 发送 /start。",
             },
         )
-    text = payload.text or "✅ TeleBot 账号 Bot 测试消息发送成功。"
+    text = payload.text or "✅ TelePilot 账号 Bot 测试消息发送成功。"
     sent = 0
     last_error = None
     for target in targets:

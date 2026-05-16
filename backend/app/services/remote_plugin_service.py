@@ -109,6 +109,9 @@ class PluginMetadataSchema(BaseModel):
     # permissions 和 config_schema 是可选扩展字段
     permissions: list[str] = field(default_factory=list)
     config_schema: dict[str, Any] | None = None
+    min_telepilot_version: str | None = None
+    # 0.15 rename 前的旧字段，继续作为兼容别名解析。
+    min_telebot_version: str | None = None
 
     @field_validator("name", "key")
     @classmethod
@@ -162,6 +165,8 @@ class PluginMetadata:
     entry: str = "plugin.py"
     permissions: list[str] = field(default_factory=list)
     config_schema: dict[str, Any] | None = None
+    min_telepilot_version: str | None = None
+    min_telebot_version: str | None = None
 
 
 def _feature_manifest_from_meta(meta: PluginMetadata) -> dict[str, Any] | None:
@@ -170,6 +175,10 @@ def _feature_manifest_from_meta(meta: PluginMetadata) -> dict[str, Any] | None:
         manifest["config_schema"] = meta.config_schema
     if meta.permissions:
         manifest["permissions"] = list(meta.permissions)
+    if meta.min_telepilot_version:
+        manifest["min_telepilot_version"] = meta.min_telepilot_version
+    if meta.min_telebot_version:
+        manifest["min_telebot_version"] = meta.min_telebot_version
     return manifest or None
 
 
@@ -330,6 +339,7 @@ def _read_plugin_metadata(plugin_dir: Path, *, fallback_name: str) -> PluginMeta
           "author": str,
           "version": str,
           "entry": str (可选，默认 plugin.py),
+          "min_telepilot_version": str (推荐，旧 min_telebot_version 仍兼容),
           "permissions": list[str] (可选),
           "config_schema": dict (可选)
         }
@@ -387,6 +397,8 @@ def _read_plugin_metadata(plugin_dir: Path, *, fallback_name: str) -> PluginMeta
         entry=str(validated.entry or "plugin.py"),
         permissions=list(validated.permissions or []),
         config_schema=validated.config_schema,
+        min_telepilot_version=validated.min_telepilot_version,
+        min_telebot_version=validated.min_telebot_version,
     )
 
 
@@ -714,7 +726,7 @@ async def update(db: AsyncSession, name: str) -> RemotePlugin:
     if (target / ".git").exists():
         await _run_git("pull", "--ff-only", cwd=target, timeout=60.0)
     else:
-        with tempfile.TemporaryDirectory(prefix="telebot-plugin-update-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="telepilot-plugin-update-") as tmp:
             repo_dir = Path(tmp) / "repo"
             await _run_git("clone", "--depth", "1", row.source_url, str(repo_dir), timeout=180.0)
 

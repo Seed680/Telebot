@@ -44,7 +44,7 @@ export function Dashboard() {
         <CardHeader className="pb-2">
           <CardTitle className="text-base">本项目资源占用</CardTitle>
           <p className="text-sm text-muted-foreground">
-            统计 TeleBot 主进程 + 全部账号 worker 在这台服务器里实际占用的 CPU 和内存（15 秒刷新）
+            统计 TelePilot 主进程 + 全部账号 worker 在这台服务器里实际占用的 CPU 和内存（15 秒刷新）
           </p>
         </CardHeader>
         <CardContent className="space-y-4 pt-0">
@@ -68,7 +68,7 @@ export function Dashboard() {
               <div className="grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
                 <div className="rounded-2xl border bg-gradient-to-br from-sky-50 via-background to-emerald-50 p-4 dark:from-sky-950/20 dark:to-emerald-950/10">
                   <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    TeleBot 本项目合计
+                    TelePilot 本项目合计
                   </p>
                   <div className="mt-3 grid grid-cols-2 gap-3">
                     <BigMetric

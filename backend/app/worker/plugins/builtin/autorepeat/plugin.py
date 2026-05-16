@@ -21,7 +21,7 @@
   - ,autorepeat list
   - ,autorepeat set [时间] [人数]  — 修改已有规则配置
 
-来源：TeleBox_Plugins/autorepeat → 适配 TeleBot 插件框架
+来源：TeleBox_Plugins/autorepeat → 适配 TelePilot 插件框架
 """
 
 from __future__ import annotations

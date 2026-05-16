@@ -18,7 +18,7 @@
 
 ## 1. 目标拓扑
 
-- 公网入口：`https://telebot.example.com`
+- 公网入口：`https://telepilot.example.com`
 - Caddy：监听 `80/443`，自动申请 TLS
 - 后端 FastAPI：仅监听 `127.0.0.1:8000`
 - 前端静态资源：`frontend/dist`
@@ -26,7 +26,7 @@
 
 ## 2. 部署前提
 
-- 已准备一个域名，例如 `telebot.example.com`
+- 已准备一个域名，例如 `telepilot.example.com`
 - 域名 A 记录已指向服务器公网 IP
 - 服务器安全组/防火墙已放通 `80/tcp`、`443/tcp`
 - 本机已安装 Docker（用于 PostgreSQL/Redis）
@@ -43,7 +43,7 @@
 复制模板：
 
 ```bash
-cd /opt/telebot
+cd /opt/telepilot
 cp backend/.env.example .env
 chmod 600 .env
 ```
@@ -54,7 +54,7 @@ chmod 600 .env
 # 公网部署必填
 COOKIE_SECURE=true
 TRUST_FORWARDED_FOR=true
-CORS_ORIGINS=https://telebot.example.com
+CORS_ORIGINS=https://telepilot.example.com
 JWT_SECRET=<32位以上强随机>
 MASTER_KEY=<Fernet.generate_key()生成值>
 POSTGRES_PASSWORD=<32位强随机>
@@ -89,13 +89,13 @@ sudo apt update && sudo apt install -y caddy
 准备配置文件：
 
 ```bash
-cd /opt/telebot
+cd /opt/telepilot
 cp deploy/Caddyfile.example /etc/caddy/Caddyfile
 ```
 
 编辑 `/etc/caddy/Caddyfile`：
 
-- 把 `telebot.example.com` 改成你的真实域名
+- 把 `telepilot.example.com` 改成你的真实域名
 - 把前端目录改为你机器上的真实绝对路径
 
 校验并启动：
@@ -118,14 +118,14 @@ sudo caddy run --config /etc/caddy/Caddyfile
 ### 5.1 启动数据库与 Redis
 
 ```bash
-cd /opt/telebot
+cd /opt/telepilot
 make dev-up
 ```
 
 ### 5.2 启动后端（仅本地监听）
 
 ```bash
-cd /opt/telebot/backend
+cd /opt/telepilot/backend
 source .venv/bin/activate
 alembic upgrade head
 uvicorn app.main:app --host 127.0.0.1 --port 8000
@@ -138,7 +138,7 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 ### 5.3 构建前端静态文件
 
 ```bash
-cd /opt/telebot/frontend
+cd /opt/telepilot/frontend
 pnpm install
 pnpm run build
 ```
@@ -147,7 +147,7 @@ pnpm run build
 
 ## 6. systemd 守护（可选）
 
-可把后端做成服务，例如 `/etc/systemd/system/telebot-backend.service`：
+可把后端做成服务，例如 `/etc/systemd/system/telepilot-backend.service`：
 
 ```ini
 [Unit]
@@ -156,9 +156,9 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/telebot/backend
-EnvironmentFile=/opt/telebot/.env
-ExecStart=/opt/telebot/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+WorkingDirectory=/opt/telepilot/backend
+EnvironmentFile=/opt/telepilot/.env
+ExecStart=/opt/telepilot/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=3
 
@@ -170,9 +170,9 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable telebot-backend
-sudo systemctl restart telebot-backend
-sudo systemctl status telebot-backend --no-pager
+sudo systemctl enable telepilot-backend
+sudo systemctl restart telepilot-backend
+sudo systemctl status telepilot-backend --no-pager
 ```
 
 ## 7. 自动备份（建议）
@@ -185,9 +185,9 @@ sudo systemctl status telebot-backend --no-pager
 
 仓库已有脚本可参考：
 
-- [deploy/backup.sh](/Users/anoyou/Desktop/telebot/deploy/backup.sh)
-- [deploy/backup-keys.sh](/Users/anoyou/Desktop/telebot/deploy/backup-keys.sh)
-- [deploy/restore.sh](/Users/anoyou/Desktop/telebot/deploy/restore.sh)
+- [deploy/backup.sh](../deploy/backup.sh)
+- [deploy/backup-keys.sh](../deploy/backup-keys.sh)
+- [deploy/restore.sh](../deploy/restore.sh)
 
 ## 8. 应急响应手册
 
@@ -224,7 +224,7 @@ sudo systemctl status telebot-backend --no-pager
 
 按顺序执行并确认：
 
-1. 访问 `https://telebot.example.com` 可打开前端页面
+1. 访问 `https://telepilot.example.com` 可打开前端页面
 2. 前端登录成功，关键 API（如 `/api/health`）可正常响应
 3. 浏览器 Cookie 带 `Secure`（`COOKIE_SECURE=true` 生效）
 4. 后端仅监听 `127.0.0.1:8000`

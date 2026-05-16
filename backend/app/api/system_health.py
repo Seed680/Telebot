@@ -981,7 +981,7 @@ async def export_config(
         except Exception as e:  # noqa: BLE001
             result[cat] = {"_error": f"{type(e).__name__}: {str(e)[:200]}"}
 
-    filename = f"telebot-config-{datetime.now().strftime('%Y-%m-%d')}.json"
+    filename = f"telepilot-config-{datetime.now().strftime('%Y-%m-%d')}.json"
     return JSONResponse(
         content=result,
         media_type="application/json",

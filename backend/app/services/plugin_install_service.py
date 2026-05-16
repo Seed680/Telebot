@@ -104,7 +104,7 @@ def parse_zip(zip_bytes: bytes) -> ParsedPlugin:
         )
 
     # 解压到一个唯一的临时目录（在系统临时目录下，install 成功后再搬到正式位置）
-    extract_dir = Path(tempfile.mkdtemp(prefix="telebot-plugin-"))
+    extract_dir = Path(tempfile.mkdtemp(prefix="telepilot-plugin-"))
     try:
         from io import BytesIO
 
@@ -207,7 +207,7 @@ def _flatten_into(src: Path, dst: Path) -> None:
 
 def _load_manifest_from_path(manifest_py: Path) -> Manifest:
     """用 importlib spec 单独加载一个 manifest.py（不会污染 app 命名空间）。"""
-    spec_name = f"_telebot_pending_manifest_{manifest_py.parent.name}_{id(manifest_py)}"
+    spec_name = f"_telepilot_pending_manifest_{manifest_py.parent.name}_{id(manifest_py)}"
     spec = importlib.util.spec_from_file_location(spec_name, manifest_py)
     if spec is None or spec.loader is None:
         raise ManifestError("MANIFEST_LOAD_FAIL", f"无法加载 {manifest_py}")

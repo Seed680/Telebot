@@ -1,4 +1,4 @@
-telebot.example.com {
+telepilot.example.com {
     encode gzip
 
     # 限流：每个 IP 每分钟 60 个写请求
@@ -15,7 +15,7 @@ telebot.example.com {
 
     # 前端静态资源（把路径改成你的真实路径）
     handle {
-        root * /opt/telebot/frontend/dist
+        root * /opt/telepilot/frontend/dist
         try_files {path} /index.html
         file_server
     }

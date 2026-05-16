@@ -1,7 +1,7 @@
-# Telegram Userbot 管理系统 — 部署指南
+# TelePilot — 部署指南
 
 > 本文档面向部署人员，说明本地（Mac）开发环境与 VPS 生产环境的搭建步骤。
-> 全部配置/命令均假设当前目录为仓库根目录 `telebot/`。
+> 全部配置/命令均假设当前目录为仓库根目录 `telepilot/`。
 
 ---
 
@@ -123,9 +123,9 @@ docker compose version
 ### 2. 拉取代码
 
 ```bash
-sudo mkdir -p /opt/telebot && sudo chown "$USER":"$USER" /opt/telebot
-git clone <你的仓库地址> /opt/telebot
-cd /opt/telebot
+sudo mkdir -p /opt/telepilot && sudo chown "$USER":"$USER" /opt/telepilot
+git clone <你的仓库地址> /opt/telepilot
+cd /opt/telepilot
 ```
 
 ### 3. 配置 `.env`
@@ -209,10 +209,10 @@ chmod +x deploy/backup.sh
 
 # 加入 crontab，每天 03:00 自动备份
 crontab -e
-# 0 3 * * * cd /opt/telebot && ./deploy/backup.sh >> /var/log/telebot-backup.log 2>&1
+# 0 3 * * * cd /opt/telepilot && ./deploy/backup.sh >> /var/log/telepilot-backup.log 2>&1
 ```
 
-备份产物默认放 `/var/backups/telebot/`，包含：
+备份产物默认放 `/var/backups/telepilot/`，包含：
 
 - `db-<时间戳>.sql` —— PostgreSQL 全量 dump
 - `sessions-<时间戳>.tgz` —— 加密的 session 卷打包

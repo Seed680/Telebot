@@ -693,7 +693,7 @@ async def _cmd_restart_account(client, event, args, account_id):
 
 @builtin("version", aliases=("v",), doc="显示版本号")
 async def _cmd_version(client, event, args, account_id):
-    """显示当前 telebot 版本与运行环境。"""
+    """显示当前 TelePilot 版本与运行环境。"""
     import platform
     import sys
 
@@ -703,7 +703,7 @@ async def _cmd_version(client, event, args, account_id):
 
     tlv = getattr(telethon, "__version__", "?")
     text = (
-        f"📦 telebot v{__version__}\n"
+        f"📦 telepilot v{__version__}\n"
         f"Python {sys.version.split()[0]} · Telethon {tlv}\n"
         f"Platform {platform.system()} {platform.release()}"
     )

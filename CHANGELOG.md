@@ -17,6 +17,35 @@
 
 ---
 
+## [0.15.0] — 2026-05-16 · feature · TelePilot rename 收口
+
+### Changed
+- 项目品牌、Web/PWA 标题、前后端包名、启动通知、账号 Bot/NotifyBot 文案和 `,version` 输出统一为 TelePilot。
+- README、部署文档、插件开发指南和远程插件指南同步 0.13/0.14 已完成能力，并明确 0.15 后的新命名与兼容边界。
+- worker PID 目录迁移到 `~/.telepilot/worker-pids`，启动清理仍会扫描旧 `~/.telebot/worker-pids`，避免升级后残留旧 worker。
+- 本地启动/停止脚本改为基于当前仓库 `backend` 路径识别孤儿 worker，同时兼容旧 `telebot/backend` 路径。
+
+### Added
+- 插件 manifest 新增 `min_telepilot_version` 字段；旧 `min_telebot_version` 继续作为 legacy alias 解析，避免远程插件生态硬断。
+- 远程插件 `plugin.json` 元数据支持 `min_telepilot_version`，并保留旧字段写入兼容。
+- 前端主题存储切换为 `telepilot-theme`，首次读取会兼容迁移旧 `telebot-theme`。
+
+### Compatibility
+- 后端 CSRF 过渡期同时接受 `X-Requested-With: telepilot-ui` 与旧 `telebot-ui`，避免旧前端缓存或脚本升级后直接 403。
+- Docker volume、数据库默认账号/库名、`TELEBOT_WORKER_PROC` 等底层兼容名暂不强制迁移，避免升级后历史数据“消失”或 worker 连接池语义变化。
+
+### Verification
+- `git diff --check` 通过。
+- `backend/.venv/bin/ruff check backend/app/main.py backend/app/worker/plugins/manifest.py backend/app/worker/plugins/loader.py backend/app/worker/supervisor.py backend/app/services/remote_plugin_service.py backend/app/tests/test_csrf_header.py backend/app/tests/test_plugin_loader.py` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telepilot_pycache backend/.venv/bin/python -m pytest backend/app/tests/test_csrf_header.py backend/app/tests/test_plugin_loader.py` 通过（17 passed）。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telepilot_pycache backend/.venv/bin/python -m pytest backend` 通过（567 passed, 2 skipped）。
+- `pnpm --dir frontend exec tsc -b --noEmit` 通过。
+- `pnpm --dir frontend build` 通过。
+- `bash -n scripts/up.sh scripts/down.sh scripts/prod-up.sh deploy/backup.sh deploy/restore.sh deploy/backup-keys.sh` 通过。
+- `docker compose -f docker-compose.yml config` 与 `docker compose -f docker-compose.dev.yml config` 均可渲染（dev compose 仅提示 `version` 字段已过时）。
+
+---
+
 ## [0.14.17] — 2026-05-16 · fix · 支持原账号重新登录覆盖 session
 
 ### Fixed

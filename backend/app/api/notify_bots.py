@@ -161,7 +161,7 @@ async def test_notify_bot(
     if row is None:
         raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": "NotifyBot 不存在或未启用"})
 
-    text = payload.text or f"test from telebot v{__version__}"
+    text = payload.text or f"test from telepilot v{__version__}"
     ok = await notify_service.send(row.name, text)
     if not ok:
         raise HTTPException(status_code=400, detail={"code": "SEND_FAILED", "message": "发送失败，请检查 bot_token 与 chat_id"})

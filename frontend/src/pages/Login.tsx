@@ -106,7 +106,7 @@ export function Login() {
           <CardTitle>{isLogin ? "登录" : "首次部署 · 创建管理员"}</CardTitle>
           <CardDescription>
             {isLogin
-              ? "Telegram Userbot 管理后台"
+              ? "TelePilot 管理控制台"
               : "本系统仅有一个超级管理员，密码请妥善保管"}
           </CardDescription>
         </CardHeader>

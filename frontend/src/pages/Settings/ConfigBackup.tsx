@@ -129,7 +129,7 @@ export function ConfigBackup() {
       // 从 Content-Disposition 提取文件名
       const disposition = res.headers["content-disposition"] || "";
       const match = disposition.match(/filename="?(.+?)"?(?:;|$)/);
-      const filename = match ? match[1] : `telebot-config-${new Date().toISOString().slice(0, 10)}.json`;
+      const filename = match ? match[1] : `telepilot-config-${new Date().toISOString().slice(0, 10)}.json`;
       // 触发下载
       const url = URL.createObjectURL(res.data as Blob);
       const a = document.createElement("a");
@@ -165,7 +165,7 @@ export function ConfigBackup() {
       const res = await exportConfigBundle(Number(bundleSourceAid));
       const disposition = res.headers["content-disposition"] || "";
       const match = disposition.match(/filename="?(.+?)"?(?:;|$)/);
-      const filename = match ? match[1] : `telebot-config-bundle-${bundleSourceAid}.json`;
+      const filename = match ? match[1] : `telepilot-config-bundle-${bundleSourceAid}.json`;
       const url = URL.createObjectURL(res.data as Blob);
       const a = document.createElement("a");
       a.href = url;

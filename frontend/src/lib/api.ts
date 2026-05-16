@@ -6,7 +6,7 @@ export const api = axios.create({
   withCredentials: true,
   timeout: 15000,
   headers: {
-    "X-Requested-With": "telebot-ui",
+    "X-Requested-With": "telepilot-ui",
   },
 });
 
