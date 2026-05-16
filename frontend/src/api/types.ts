@@ -158,6 +158,11 @@ export interface AccountBotUserUpdate {
   notify_enabled?: boolean;
   enabled?: boolean;
 }
+export interface AccountBotTestResponse {
+  ok: boolean;
+  sent: number;
+  message: string;
+}
 
 // ===================== 设备伪装 =====================
 export interface DeviceProfileOut {
@@ -250,6 +255,7 @@ export interface ConfigBundleDiffItem {
   entity: "feature" | "rule" | "command_link" | "ignored_peer";
   key: string;
   action: "add" | "skip" | "conflict";
+  conflict_kind?: "overridable" | "blocked" | null;
   fields: string[];
   note?: string | null;
 }
@@ -262,6 +268,7 @@ export interface ConfigBundleDryRunResponse {
   counts: ConfigBundleDiffCounts;
   items: ConfigBundleDiffItem[];
   warnings: string[];
+  preview_signature?: string | null;
 }
 
 export interface ConfigBundleConfirmResponse {
@@ -272,6 +279,7 @@ export interface ConfigBundleConfirmResponse {
   skipped: number;
   conflicts: number;
   warnings: string[];
+  preview_signature?: string | null;
 }
 
 // ===================== 功能 =====================
@@ -627,6 +635,11 @@ export interface WorkersHealthStatus {
   total: number;
   /** {status: count}，如 {"active":3,"paused":1,"login_required":1} */
   by_status: Record<string, number>;
+  runtime_total: number;
+  runtime_alive: number;
+  runtime_desired_running: number;
+  runtime_desired_running_alive: number;
+  runtime_failing: number;
 }
 
 export interface HealthOverview {

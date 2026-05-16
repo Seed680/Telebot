@@ -17,6 +17,29 @@
 
 ---
 
+## [0.15.2] — 2026-05-16 · fix · 完成审查后续收口
+
+### Fixed
+- Config Bundle dry-run/confirm 增加预览签名绑定，目标账号配置快照、可用 feature/template、文件或冲突选项变化后必须重新预览。
+- Config Bundle chat/peer/group 相关嵌套字段冲突现在会触发二次确认；缺失 feature/template 等不可恢复冲突会被 blocked。
+- Config Bundle confirm 写库成功后会通知目标账号 worker reload 配置、命令和忽略列表。
+- feature/rule/audit/runtime log 等路径统一敏感字段脱敏且避免误伤 `max_tokens` 等非敏感计数字段，Codex Image token 改为 write-only 展示。
+- 健康检查纳入 worker runtime 存活与失败计数，异常态刷新更快并支持手动刷新；Audit 日志筛选改为后端过滤。
+- 修正 account_bot 测试接口前端类型漂移，`testAccountBot` 现在返回后端实际响应。
+- README、安全运维、远程插件、插件开发和部署文档同步当前安全边界与 TelePilot 命名。
+
+### Added
+- 新增 Config Bundle 签名、blocked conflict、worker reload 回归测试。
+- 新增敏感字段脱敏、日志查询筛选、健康检查 worker runtime 聚合测试。
+
+### Verification
+- `backend/.venv/bin/ruff check backend/app/api/config_bundle.py backend/app/api/features.py backend/app/api/logs.py backend/app/api/rules.py backend/app/api/system_health.py backend/app/schemas/config_bundle.py backend/app/services/audit.py backend/app/services/config_bundle_service.py backend/app/services/redactor.py backend/app/worker/supervisor.py backend/app/tests/test_config_bundle.py backend/app/tests/test_logs_api.py backend/app/tests/test_redaction_security.py backend/app/tests/test_supervisor_reliable_consumer.py backend/app/tests/test_system_health.py` 通过。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telepilot_pycache backend/.venv/bin/python -m pytest backend/app/tests/test_config_bundle.py backend/app/tests/test_redaction_security.py backend/app/tests/test_supervisor_reliable_consumer.py backend/app/tests/test_system_health.py backend/app/tests/test_logs_api.py` 通过（46 passed）。
+- `PYTHONPYCACHEPREFIX=/private/tmp/telepilot_pycache backend/.venv/bin/python -m pytest backend` 通过（590 passed, 2 skipped）。
+- `pnpm --dir frontend build` 通过。
+
+---
+
 ## [0.15.1] — 2026-05-16 · fix · 收紧远程插件与自动命令安全边界
 
 ### Fixed
