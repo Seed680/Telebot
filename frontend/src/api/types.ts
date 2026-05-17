@@ -837,6 +837,12 @@ export interface AICommandConfig {
   quote_replied?: boolean;
   system_prompt?: string;
   max_tokens?: number;
+  /** 采样温度，0 更稳定，2 更发散；空表示不覆盖 provider 默认值 */
+  temperature?: number;
+  /** 推理模型的思考预算；当前主要用于 OpenAI Chat/Responses 协议 */
+  reasoning_effort?: "minimal" | "low" | "medium" | "high";
+  /** 单次 API 调用超时时间，单位秒 */
+  timeout_seconds?: number;
   // ── 路由（Sprint2 #2 路由扩展）──
   /**
    * fixed = 永远用 provider_id（V1 行为，默认）

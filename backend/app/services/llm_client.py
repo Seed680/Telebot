@@ -48,6 +48,26 @@ _RETRY_BASE_DELAY = 1.0
 _RETRY_MAX_DELAY = 30.0
 
 
+def _timeout_for_call(base_url: str, timeout_seconds: int | None) -> httpx.Timeout:
+    if timeout_seconds and timeout_seconds > 0:
+        seconds = float(max(1, timeout_seconds))
+        return httpx.Timeout(seconds, connect=min(10.0, seconds))
+    if "127.0.0.1" in base_url or "localhost" in base_url:
+        return _LOCAL_TIMEOUT
+    return _HTTP_TIMEOUT
+
+
+def _normalize_temperature(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return max(0.0, min(2.0, float(value)))
+
+
+def _normalize_reasoning_effort(value: str | None) -> str | None:
+    effort = (value or "").strip().lower()
+    return effort if effort in {"minimal", "low", "medium", "high"} else None
+
+
 @dataclass
 class LLMResult:
     """LLM 调用的统一结果。"""
@@ -151,6 +171,9 @@ class LLMClient(ABC):
         images: list[bytes] | None = None,
         web_search: bool = False,
         web_search_context_size: str | None = None,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> LLMResult:
         """以 system + user 拼 prompt（可附图），返回回答与 token 统计。
 
@@ -203,6 +226,9 @@ class OpenAIClient(LLMClient):
         images: list[bytes] | None = None,
         web_search: bool = False,
         web_search_context_size: str | None = None,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> LLMResult:
         if web_search:
             raise LLMError("联网搜索需要使用 OpenAI Responses API（api_format=responses）")
@@ -230,13 +256,18 @@ class OpenAIClient(LLMClient):
             ],
             "max_tokens": max_tokens,
         }
+        normalized_temperature = _normalize_temperature(temperature)
+        if normalized_temperature is not None:
+            body["temperature"] = normalized_temperature
+        normalized_effort = _normalize_reasoning_effort(reasoning_effort)
+        if normalized_effort is not None:
+            body["reasoning_effort"] = normalized_effort
         # httpx 0.28+ 用 proxy=<str> 单参数；socks5 需要 httpx[socks] 安装的 socksio
         # 当 proxy_url 为空时，显式 trust_env=False 避免 httpx 读取环境变量中的
         # HTTP_PROXY / NO_PROXY（NO_PROXY 含 ::1 会导致 httpx InvalidURL 崩溃）
         # 本地桥接（grok-bridge 等 localhost 服务）需要更长超时：浏览器 JS 执行 +
         # LLM 生成 + 图片 XHR 下载，整个过程可能超过 30 秒
-        _is_local = "127.0.0.1" in self._base_url or "localhost" in self._base_url
-        client_kwargs: dict[str, object] = {"timeout": _LOCAL_TIMEOUT if _is_local else _HTTP_TIMEOUT}
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
         if self._proxy_url:
             client_kwargs["proxy"] = self._proxy_url
         else:
@@ -381,6 +412,9 @@ class AnthropicClient(LLMClient):
         images: list[bytes] | None = None,
         web_search: bool = False,
         web_search_context_size: str | None = None,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> LLMResult:
         if web_search:
             raise LLMError("当前 Anthropic 调用路径尚未接入联网搜索；请使用 OpenAI Responses provider")
@@ -422,8 +456,10 @@ class AnthropicClient(LLMClient):
             # 使用流式（SSE）模式；Anyrouter 等 Claude Code 反代依赖流式协议分发
             "stream": True,
         }
-        _is_local = "127.0.0.1" in self._base_url or "localhost" in self._base_url
-        client_kwargs: dict[str, object] = {"timeout": _LOCAL_TIMEOUT if _is_local else _HTTP_TIMEOUT}
+        normalized_temperature = _normalize_temperature(temperature)
+        if normalized_temperature is not None:
+            body["temperature"] = normalized_temperature
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
         if self._proxy_url:
             client_kwargs["proxy"] = self._proxy_url
         else:
@@ -549,6 +585,9 @@ class ResponsesClient(LLMClient):
         images: list[bytes] | None = None,
         web_search: bool = False,
         web_search_context_size: str | None = None,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> LLMResult:
         url = f"{self._base_url}/responses"
         headers = {"Content-Type": "application/json"}
@@ -576,6 +615,12 @@ class ResponsesClient(LLMClient):
             # Responses API 用 max_output_tokens（不是 max_tokens）
             "max_output_tokens": max_tokens,
         }
+        normalized_temperature = _normalize_temperature(temperature)
+        if normalized_temperature is not None:
+            body["temperature"] = normalized_temperature
+        normalized_effort = _normalize_reasoning_effort(reasoning_effort)
+        if normalized_effort is not None:
+            body["reasoning"] = {"effort": normalized_effort}
         if web_search:
             size = (web_search_context_size or "medium").lower()
             if size not in {"low", "medium", "high"}:
@@ -583,8 +628,7 @@ class ResponsesClient(LLMClient):
             body["tools"] = [{"type": "web_search", "search_context_size": size}]
             body["include"] = ["web_search_call.action.sources"]
 
-        _is_local = "127.0.0.1" in self._base_url or "localhost" in self._base_url
-        client_kwargs: dict[str, object] = {"timeout": _LOCAL_TIMEOUT if _is_local else _HTTP_TIMEOUT}
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
         if self._proxy_url:
             client_kwargs["proxy"] = self._proxy_url
         else:

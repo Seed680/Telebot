@@ -1,5 +1,5 @@
 const BLOCKQUOTE_STYLE =
-  "margin:0.35rem 0;padding:0.35rem 0.65rem;border-left:3px solid hsl(var(--border));background:hsl(var(--muted) / 0.35);border-radius:0.25rem;";
+  "margin:0.35rem 0;padding:0.35rem 0.65rem;border-left:3px solid rgba(255,255,255,.65);background:rgba(255,255,255,.14);border-radius:0.45rem;";
 
 function escapeHtml(value: string): string {
   return value
@@ -27,6 +27,48 @@ function sanitizeTelegramHtml(value: string): string {
 }
 
 export function TelegramHtmlPreview({
+  value,
+  mode,
+  title = "TelePilot",
+}: {
+  value: string;
+  mode?: "html" | "markdown" | "plain";
+  title?: string;
+}) {
+  const content = value || "预览内容为空。";
+  const rendered =
+    mode && mode !== "html" ? (
+      <pre className="whitespace-pre-wrap break-words font-sans text-white">
+        {content}
+      </pre>
+    ) : (
+      <div
+        className="whitespace-pre-wrap break-words text-white [&_a]:text-white [&_code]:rounded [&_code]:bg-white/15 [&_code]:px-1 [&_code]:py-0.5 [&_pre]:rounded [&_pre]:bg-white/15 [&_pre]:p-2"
+        dangerouslySetInnerHTML={{ __html: sanitizeTelegramHtml(content) }}
+      />
+    );
+
+  return (
+    <div className="rounded-2xl border bg-gradient-to-b from-sky-50 to-emerald-50 p-4 text-xs dark:from-sky-950/30 dark:to-emerald-950/20">
+      <div className="space-y-2.5">
+        <div className="w-fit max-w-[78%] rounded-2xl rounded-bl-lg border bg-card px-3.5 py-2.5 text-foreground shadow-sm sm:max-w-[66%]">
+          <div className="font-medium text-[11px] text-muted-foreground">示例用户</div>
+          <div className="mt-1">请根据下面内容回复。</div>
+        </div>
+
+        <div className="ml-auto w-fit max-w-[88%] rounded-2xl rounded-br-lg bg-sky-500 px-3.5 py-2.5 text-white shadow-sm sm:max-w-[76%]">
+          <div className="mb-1.5 text-[11px] font-semibold text-white/85">{title}</div>
+          {rendered}
+          <div className="mt-1.5 text-right text-[10px] leading-none text-white/75">
+            12:30 ✓✓
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function TelegramHtmlContentPreview({
   value,
   mode,
 }: {

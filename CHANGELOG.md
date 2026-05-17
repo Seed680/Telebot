@@ -19,6 +19,61 @@
 
 ---
 
+## [0.16.8] — 2026-05-17 · changed · Telegram 消息预览
+
+### Changed
+- 自定义命令模板里的消息格式预览改为 Telegram 风格聊天预览：浅色聊天背景、示例用户消息、TelePilot 蓝色气泡和时间状态，效果更接近真实消息。
+- 通用 `TelegramHtmlPreview` 组件升级为消息气泡预览，插件配置里的模板预览也会使用同一套视觉效果。
+- 开发文档新增 Telegram 消息预览规范，说明模板预览应展示替换占位符后的最终消息效果，并优先复用 `TelegramHtmlPreview`。
+
+### Verification
+- `pnpm --dir frontend build` 通过。
+- `backend/.venv/bin/python -m pytest backend/app/tests/test_commands.py backend/app/tests/test_ai_runtime.py backend/app/tests/test_scheduler_runtime.py backend/app/tests/test_llm_runtime.py -q` 通过。
+- `git diff --check` 通过。
+
+---
+
+## [0.16.7] — 2026-05-17 · changed · AI 模式化默认参数
+
+### Changed
+- AI 命令模板的模型参数默认值改为跟随模式：chat 使用 `temperature=0.7`、`reasoning_effort=medium`、`timeout_seconds=60`；search 使用 `0.2 / medium / 90`；image 使用 `0.8 / low / 180`；video 预留使用 `0.8 / low / 300`。
+- 切换 AI 模式时，如果当前参数仍是旧模式默认值或为空，会自动带入新模式默认值；用户手动改过的值不会被覆盖。
+- 模型参数说明改为展示当前模式默认值，避免生图、视频等长耗时任务沿用普通 chat 的短超时。
+
+### Verification
+- `pnpm --dir frontend build` 通过。
+- `backend/.venv/bin/python -m pytest backend/app/tests/test_commands.py backend/app/tests/test_ai_runtime.py backend/app/tests/test_scheduler_runtime.py backend/app/tests/test_llm_runtime.py -q` 通过。
+- `git diff --check` 通过。
+
+---
+
+## [0.16.6] — 2026-05-17 · changed · AI 参数默认值
+
+### Changed
+- AI 命令模板的模型参数现在提供默认值：温度 `0.7`、推理强度 `medium`、超时时间 `60` 秒。
+- 模型参数说明同步汉化默认值含义，减少新增 AI 命令时需要手动补齐基础参数的步骤。
+
+### Verification
+- `pnpm --dir frontend build` 通过。
+- `backend/.venv/bin/python -m pytest backend/app/tests/test_commands.py backend/app/tests/test_ai_runtime.py backend/app/tests/test_scheduler_runtime.py backend/app/tests/test_llm_runtime.py -q` 通过。
+- `git diff --check` 通过。
+
+---
+
+## [0.16.5] — 2026-05-17 · feature · AI 模型参数配置
+
+### Added
+- AI 命令模板新增“模型参数”折叠区，支持配置温度（temperature）、推理强度（reasoning_effort）和单次调用超时时间。
+- 模型参数均提供中文说明：温度解释稳定/创作取向，推理强度解释思考预算，超时时间解释长推理与本地桥接场景。
+- 后端统一 LLM 调用链支持透传 temperature、reasoning_effort 和 timeout_seconds；OpenAI Chat/Responses 支持推理强度，Anthropic 先透传 temperature。
+
+### Verification
+- `pnpm --dir frontend build` 通过。
+- `backend/.venv/bin/python -m pytest backend/app/tests/test_commands.py backend/app/tests/test_ai_runtime.py backend/app/tests/test_scheduler_runtime.py backend/app/tests/test_llm_runtime.py -q` 通过。
+- `git diff --check` 通过。
+
+---
+
 ## [0.16.4] — 2026-05-17 · feature · Provider 协议检测
 
 ### Added

@@ -182,6 +182,9 @@ async def call_with_fallback(
     images: list[bytes] | None = None,
     web_search: bool = False,
     web_search_context_size: str | None = None,
+    temperature: float | None = None,
+    reasoning_effort: str | None = None,
+    timeout_seconds: int | None = None,
     *,
     # 隐私控制
     log_prompt_preview: bool = False,  # 设为 True 时只记录前 100 字符
@@ -269,6 +272,9 @@ async def call_with_fallback(
                 images=images,
                 web_search=web_search,
                 web_search_context_size=web_search_context_size,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
+                timeout_seconds=timeout_seconds,
                 log_prompt_preview=log_prompt_preview,
                 client_factory=client_factory,
             )
@@ -459,6 +465,9 @@ async def _call_with_retry(
     images: list[bytes] | None,
     web_search: bool,
     web_search_context_size: str | None,
+    temperature: float | None,
+    reasoning_effort: str | None,
+    timeout_seconds: int | None,
     log_prompt_preview: bool,
     client_factory: Callable[..., Any | Awaitable[Any]] | None = None,
     max_retries: int = _MAX_RETRIES,
@@ -484,22 +493,17 @@ async def _call_with_retry(
             )
             if inspect.isawaitable(client):
                 client = await client
+            kwargs = {
+                "max_tokens": max_tokens,
+                "images": images,
+                "temperature": temperature,
+                "reasoning_effort": reasoning_effort,
+                "timeout_seconds": timeout_seconds,
+            }
             if web_search:
-                result = await client.complete(
-                    system,
-                    user,
-                    max_tokens=max_tokens,
-                    images=images,
-                    web_search=True,
-                    web_search_context_size=web_search_context_size,
-                )
-            else:
-                result = await client.complete(
-                    system,
-                    user,
-                    max_tokens=max_tokens,
-                    images=images,
-                )
+                kwargs["web_search"] = True
+                kwargs["web_search_context_size"] = web_search_context_size
+            result = await _call_complete_compat(client, system, user, kwargs)
             latency_ms = int((time.monotonic() - start_time) * 1000)
 
             if attempt > 0:
@@ -562,6 +566,25 @@ async def _call_with_retry(
 
     # 理论上不会走到这里
     raise last_error or RuntimeError("重试耗尽但无错误信息")
+
+
+async def _call_complete_compat(
+    client: Any,
+    system: str,
+    user: str,
+    kwargs: dict[str, Any],
+) -> LLMResult:
+    """Call ``complete`` while tolerating older test doubles with fewer kwargs."""
+    complete = client.complete
+    try:
+        sig = inspect.signature(complete)
+    except (TypeError, ValueError):
+        return await complete(system, user, **kwargs)
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        return await complete(system, user, **kwargs)
+    allowed = set(sig.parameters)
+    filtered = {key: value for key, value in kwargs.items() if key in allowed}
+    return await complete(system, user, **filtered)
 
 
 # ── 辅助函数 ────────────────────────────────────────────────

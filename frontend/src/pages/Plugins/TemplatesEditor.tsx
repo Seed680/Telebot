@@ -73,8 +73,27 @@ const TYPE_LABELS: Record<CommandTemplateType, string> = {
   ai: "AI",
 };
 
-type AiCapability = "routing" | "search" | "output";
+type AiCapability = "routing" | "search" | "output" | "params";
 type AiCommandMode = "chat" | "search" | "image" | "video";
+type AiReasoningEffort = "" | "minimal" | "low" | "medium" | "high";
+
+const AI_MODE_DEFAULTS: Record<
+  AiCommandMode,
+  {
+    temperature: string;
+    reasoning_effort: AiReasoningEffort;
+    timeout_seconds: string;
+  }
+> = {
+  chat: { temperature: "0.7", reasoning_effort: "medium", timeout_seconds: "60" },
+  search: { temperature: "0.2", reasoning_effort: "medium", timeout_seconds: "90" },
+  image: { temperature: "0.8", reasoning_effort: "low", timeout_seconds: "180" },
+  video: { temperature: "0.8", reasoning_effort: "low", timeout_seconds: "300" },
+};
+
+const DEFAULT_AI_TEMPERATURE = AI_MODE_DEFAULTS.chat.temperature;
+const DEFAULT_AI_REASONING_EFFORT = AI_MODE_DEFAULTS.chat.reasoning_effort;
+const DEFAULT_AI_TIMEOUT_SECONDS = AI_MODE_DEFAULTS.chat.timeout_seconds;
 
 interface FormState {
   id?: number;
@@ -99,6 +118,9 @@ interface FormState {
   ai_model: string;
   ai_system_prompt: string;
   ai_max_tokens: string;
+  ai_temperature: string;
+  ai_reasoning_effort: AiReasoningEffort;
+  ai_timeout_seconds: string;
   ai_quote_replied: boolean;
   // ── 路由（auto 模式才用到，fixed 留空即可）──
   ai_routing_mode: "fixed" | "auto";
@@ -135,6 +157,9 @@ const EMPTY_FORM: FormState = {
   ai_model: "",
   ai_system_prompt: "你是简洁有用的中文助手。回答控制在 100 字内。",
   ai_max_tokens: "512",
+  ai_temperature: DEFAULT_AI_TEMPERATURE,
+  ai_reasoning_effort: DEFAULT_AI_REASONING_EFFORT,
+  ai_timeout_seconds: DEFAULT_AI_TIMEOUT_SECONDS,
   ai_quote_replied: true,
   ai_routing_mode: "fixed",
   ai_routing_fallback_provider_id: "",
@@ -152,8 +177,29 @@ function normalizeAiMode(value: unknown): AiCommandMode {
   return value === "search" || value === "image" || value === "video" ? value : "chat";
 }
 
+function applyAiModeDefaults(form: FormState, nextMode: AiCommandMode): Partial<FormState> {
+  const currentDefaults = AI_MODE_DEFAULTS[form.ai_mode];
+  const nextDefaults = AI_MODE_DEFAULTS[nextMode];
+  return {
+    ai_temperature:
+      !form.ai_temperature || form.ai_temperature === currentDefaults.temperature
+        ? nextDefaults.temperature
+        : form.ai_temperature,
+    ai_reasoning_effort:
+      !form.ai_reasoning_effort || form.ai_reasoning_effort === currentDefaults.reasoning_effort
+        ? nextDefaults.reasoning_effort
+        : form.ai_reasoning_effort,
+    ai_timeout_seconds:
+      !form.ai_timeout_seconds || form.ai_timeout_seconds === currentDefaults.timeout_seconds
+        ? nextDefaults.timeout_seconds
+        : form.ai_timeout_seconds,
+  };
+}
+
 function formFromTemplate(t: CommandTemplateOut): FormState {
   const cfg = t.config || {};
+  const aiMode = normalizeAiMode(cfg.mode);
+  const modeDefaults = AI_MODE_DEFAULTS[aiMode];
   return {
     id: t.id,
     name: t.name,
@@ -174,7 +220,7 @@ function formFromTemplate(t: CommandTemplateOut): FormState {
     plugin_key: typeof cfg.plugin_key === "string" ? (cfg.plugin_key as string) : "",
     plugin_method: typeof cfg.method === "string" ? (cfg.method as string) : "",
     plugin_args: cfg.args ? JSON.stringify(cfg.args) : "[]",
-    ai_mode: normalizeAiMode(cfg.mode),
+    ai_mode: aiMode,
     ai_provider_id:
       cfg.provider_id !== undefined && cfg.provider_id !== null
         ? String(cfg.provider_id)
@@ -188,6 +234,21 @@ function formFromTemplate(t: CommandTemplateOut): FormState {
       cfg.max_tokens !== undefined && cfg.max_tokens !== null
         ? String(cfg.max_tokens)
         : "512",
+    ai_temperature:
+      cfg.temperature !== undefined && cfg.temperature !== null
+        ? String(cfg.temperature)
+        : modeDefaults.temperature,
+    ai_reasoning_effort:
+      cfg.reasoning_effort === "minimal" ||
+        cfg.reasoning_effort === "low" ||
+        cfg.reasoning_effort === "medium" ||
+        cfg.reasoning_effort === "high"
+        ? cfg.reasoning_effort
+        : modeDefaults.reasoning_effort,
+    ai_timeout_seconds:
+      cfg.timeout_seconds !== undefined && cfg.timeout_seconds !== null
+        ? String(cfg.timeout_seconds)
+        : modeDefaults.timeout_seconds,
     ai_quote_replied: cfg.quote_replied !== false, // 默认 true
     ai_routing_mode:
       cfg.routing_mode === "auto" ? "auto" : "fixed",
@@ -290,6 +351,8 @@ function buildPayload(form: FormState): {
   if (!usesCodexImage && (!Number.isInteger(pid) || pid <= 0))
     return { ok: false, errMsg: "AI 类型必须选择模型提供商" };
   const mt = form.ai_max_tokens.trim();
+  const temperature = form.ai_temperature.trim();
+  const timeoutSeconds = form.ai_timeout_seconds.trim();
   const cfg: Record<string, unknown> = {
     mode: form.ai_mode,
     quote_replied: form.ai_quote_replied,
@@ -304,6 +367,23 @@ function buildPayload(form: FormState): {
   }
   if (form.ai_model.trim()) cfg.model = form.ai_model.trim();
   if (mt) cfg.max_tokens = Number(mt) || 512;
+  if (temperature) {
+    const n = Number(temperature);
+    if (!Number.isFinite(n) || n < 0 || n > 2) {
+      return { ok: false, errMsg: "温度 temperature 必须是 0~2 之间的数字" };
+    }
+    cfg.temperature = n;
+  }
+  if (form.ai_reasoning_effort) {
+    cfg.reasoning_effort = form.ai_reasoning_effort;
+  }
+  if (timeoutSeconds) {
+    const n = Number(timeoutSeconds);
+    if (!Number.isInteger(n) || n < 5 || n > 600) {
+      return { ok: false, errMsg: "超时时间必须是 5~600 秒之间的整数" };
+    }
+    cfg.timeout_seconds = n;
+  }
   // 路由字段：只在 auto 模式下下发，避免 fixed 留脏数据
   if (form.ai_routing_mode === "auto") {
     if (form.ai_routing_fallback_provider_id.trim()) {
@@ -398,7 +478,8 @@ export function CommandTemplates() {
     const capability =
       capabilityParam === "routing" ||
       capabilityParam === "search" ||
-      capabilityParam === "output"
+      capabilityParam === "output" ||
+      capabilityParam === "params"
         ? capabilityParam
         : null;
     const shouldOpenNewAi = newType === "ai" || (!!capability && !editId);
@@ -784,14 +865,17 @@ function CommandEditDialog({
     if (form.ai_output_template.trim() || form.ai_output_format !== "html" || !form.ai_escape_values) {
       defaults.push("output");
     }
+    if (form.ai_temperature || form.ai_reasoning_effort || form.ai_timeout_seconds) defaults.push("params");
     return defaults;
   });
   const routingSectionRef = useRef<HTMLDivElement | null>(null);
   const searchSectionRef = useRef<HTMLDivElement | null>(null);
   const outputSectionRef = useRef<HTMLDivElement | null>(null);
+  const paramsSectionRef = useRef<HTMLDivElement | null>(null);
   const getSectionRef = (section: AiCapability) => {
     if (section === "routing") return routingSectionRef;
     if (section === "search") return searchSectionRef;
+    if (section === "params") return paramsSectionRef;
     return outputSectionRef;
   };
 
@@ -1022,6 +1106,7 @@ function CommandEditDialog({
                       ai_mode: mode,
                       ai_web_search: mode === "search" ? true : form.ai_web_search,
                       ai_image_backend: mode === "image" ? form.ai_image_backend : EMPTY_FORM.ai_image_backend,
+                      ...applyAiModeDefaults(form, mode),
                     });
                   }}
                 >
@@ -1123,7 +1208,7 @@ function CommandEditDialog({
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
-                  <Label>max_tokens</Label>
+                  <Label>最大输出 tokens（max_tokens）</Label>
                   <Input
                     inputMode="numeric"
                     value={form.ai_max_tokens}
@@ -1134,6 +1219,9 @@ function CommandEditDialog({
                       )
                     }
                   />
+                  <p className="text-xs text-muted-foreground">
+                    限制单次回答长度；Responses API 会自动映射为 max_output_tokens。
+                  </p>
                 </div>
                 <div className="flex items-center gap-2 self-end pb-2">
                   <Switch
@@ -1179,6 +1267,76 @@ function CommandEditDialog({
               </div>
 
               <div className="space-y-2">
+                <CollapsibleAiSection
+                  ref={paramsSectionRef}
+                  title="模型参数"
+                  description={
+                    form.ai_temperature || form.ai_reasoning_effort || form.ai_timeout_seconds
+                      ? "已设置采样 / 推理 / 超时"
+                      : "使用系统默认参数"
+                  }
+                  open={openAiSections.includes("params")}
+                  onToggle={() => toggleAiSection("params")}
+                >
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <div className="space-y-1.5">
+                      <Label>温度（temperature）</Label>
+                      <Input
+                        inputMode="decimal"
+                        placeholder={AI_MODE_DEFAULTS[form.ai_mode].temperature}
+                        value={form.ai_temperature}
+                        onChange={(e) =>
+                          setField(
+                            "ai_temperature",
+                            e.target.value.replace(/[^\d.]/g, ""),
+                          )
+                        }
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        当前模式默认 {AI_MODE_DEFAULTS[form.ai_mode].temperature}；0 更稳定，适合搜索、总结、分类；最高 2，更适合创作。
+                      </p>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>推理强度（reasoning_effort）</Label>
+                      <Select
+                        value={form.ai_reasoning_effort}
+                        onChange={(e) =>
+                          setField(
+                            "ai_reasoning_effort",
+                            e.target.value as FormState["ai_reasoning_effort"],
+                          )
+                        }
+                      >
+                        <option value="">不下发</option>
+                        <option value="minimal">minimal · 极低</option>
+                        <option value="low">low · 低</option>
+                        <option value="medium">medium · 中</option>
+                        <option value="high">high · 高</option>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        当前模式默认 {AI_MODE_DEFAULTS[form.ai_mode].reasoning_effort || "不下发"}；控制支持推理模型的思考预算，当前对 OpenAI Chat/Responses 协议下发。
+                      </p>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>超时时间（秒）</Label>
+                      <Input
+                        inputMode="numeric"
+                        placeholder={AI_MODE_DEFAULTS[form.ai_mode].timeout_seconds}
+                        value={form.ai_timeout_seconds}
+                        onChange={(e) =>
+                          setField(
+                            "ai_timeout_seconds",
+                            e.target.value.replace(/[^\d]/g, ""),
+                          )
+                        }
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        当前模式默认 {AI_MODE_DEFAULTS[form.ai_mode].timeout_seconds} 秒；单次 API 调用等待时间，5~600 秒；长推理或本地桥接可适当调高。
+                      </p>
+                    </div>
+                  </div>
+                </CollapsibleAiSection>
+
                 <CollapsibleAiSection
                   ref={routingSectionRef}
                   title="路由策略"

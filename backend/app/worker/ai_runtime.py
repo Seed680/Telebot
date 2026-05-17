@@ -80,6 +80,35 @@ def _prettify_model_id(model_id: str) -> str:
     return " ".join(pretty) or model_id
 
 
+def _optional_float(value: Any, *, min_value: float, max_value: float) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed < min_value or parsed > max_value:
+        return None
+    return parsed
+
+
+def _optional_int(value: Any, *, min_value: int, max_value: int) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed < min_value or parsed > max_value:
+        return None
+    return parsed
+
+
+def _optional_reasoning_effort(value: Any) -> str | None:
+    effort = str(value or "").strip().lower()
+    return effort if effort in {"minimal", "low", "medium", "high"} else None
+
+
 async def invoke(client, event, args, tpl: dict[str, Any], account_id: int) -> None:
     from .command import (
         _humanize_llm_error,
@@ -397,6 +426,9 @@ async def invoke(client, event, args, tpl: dict[str, Any], account_id: int) -> N
     )
     system = base_system + _ANTI_HALLUCINATION
     max_tokens = int(cfg.get("max_tokens") or 512)
+    temperature = _optional_float(cfg.get("temperature"), min_value=0.0, max_value=2.0)
+    reasoning_effort = _optional_reasoning_effort(cfg.get("reasoning_effort"))
+    timeout_seconds = _optional_int(cfg.get("timeout_seconds"), min_value=5, max_value=600)
     
     # 决策 override_model 优先级：
     #   1. inline @name:model 显式指定 → 用该 model
@@ -527,6 +559,9 @@ async def invoke(client, event, args, tpl: dict[str, Any], account_id: int) -> N
             images=image_bytes_list or None,
             web_search=web_search,
             web_search_context_size=web_search_context_size,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+            timeout_seconds=timeout_seconds,
             account_id=account_id,
             source=f"command:{tpl.get('name') or 'ai'}",
             fallback_provider_id=fallback_provider_id,
