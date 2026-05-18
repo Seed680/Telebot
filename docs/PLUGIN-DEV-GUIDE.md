@@ -29,8 +29,10 @@
     - [适配自检清单](#适配自检清单)
 14. [模块工程规范](#14-模块工程规范plugin-实现)
     - [发布与交互体验检查清单](#发布与交互体验检查清单)
+    - [指令权限底线](#指令权限底线)
     - [消息发送能力边界](#消息发送能力边界)
     - [并发与抢答标准模板](#并发与抢答标准模板)
+    - [配置项完整性原则](#配置项完整性原则)
     - [统一配置项命名与校验](#统一配置项命名与校验)
     - [模板配置与占位符](#模板配置与占位符)
     - [定时任务与后台任务生命周期](#定时任务与后台任务生命周期)
@@ -151,8 +153,8 @@ class Plugin:
 
     # === 可选配置 ===
     message_channels: set[str]        # 监听方向: {"incoming"} / {"outgoing"} / 二者都监听
-    owner_only: bool = True           # on_message 是否只允许账号本人/授权 sudo 触发
-    commands: dict = {}               # TG 内指令: command_name -> 5 参数 handler
+    owner_only: bool = True           # 只影响 on_message；False 表示允许普通成员消息进入 on_message
+    commands: dict = {}               # TG 内指令；只由本账号 outgoing 指令触发
     command_config_keys: set[str] = set()  # 这些配置变化后需要重载并重新注册指令
     description: str = ""             # 描述（用于帮助系统）
 
@@ -352,9 +354,17 @@ version_pattern = r"^\d+\.\d+\.\d+"
 
 ## 6. 指令系统（command API）
 
+**安全底线：普通指令只能由当前 UserBot 账号自己发出的 outgoing 消息触发。** 群成员、普通用户、频道消息等 incoming 消息不能直接触发模块 `commands`。`owner_only=False` 只表示模块的 `on_message` 可以监听普通成员消息，不表示开放指令执行权限。
+
+红包、抢答、24 点、猜数字这类“公共参与 + 私有管理”的模块必须按这个模型设计：
+
+- 开局、发红包、撤销、强制结束、查看管理状态等管理动作写成 `commands`，只能由本账号 outgoing 指令触发。
+- 领取口令、答题、参与投票等普通成员行为写在 `on_message`，通过普通文本判断，不要求用户发送系统指令前缀。
+- 如果自动回复、定时任务等平台内部动作需要“代替本账号执行指令”，使用平台内部派发能力，不让普通 incoming 消息直接进 `commands`。
+
 ### 指令派发流程
 
-1. 消息到达 → 检查前缀匹配
+1. 当前账号 outgoing 消息到达 → 检查前缀匹配
 2. 提取指令名和参数
 3. 检查别名（贪心最长匹配）
 4. 遍历已注册模块，调用 `on_command(ctx, cmd, args, event)`
@@ -1149,6 +1159,8 @@ class DemoPlugin(Plugin):
 - [ ] 如果有专属页面：`App.tsx` 中 `FEATURE_CONFIG_PAGES` 包含该 key
 - [ ] 如果有专属页面：`frontend/src/pages/Plugins/_shared/featureConfig.ts` 的 `FEATURE_CONFIG_PAGE_KEYS` 包含该 key
 - [ ] 如果是指令型模块：`command` 字段可配置，`Plugin.command_config_keys = {"command"}`，说明文案动态读取当前指令
+- [ ] 指令型模块的帮助、取消/结束、撤销、自动删除、冷却/超时、消息模板等用户常调行为已尽量配置化；帮助模板支持 `{prefix}`，不硬编码 `,命令`
+- [ ] `owner_only=False` 仅用于开放 `on_message`，没有把普通 incoming 消息当成管理指令入口
 - [ ] 页面按“使用说明 → 功能总开关 → 配置”的独立卡片顺序排布；不要把说明、总开关和配置混在一张卡片
 - [ ] 有可保存字段的页面使用顶部冻结“配置操作”条；长配置不只在底部放保存按钮
 - [ ] 配置主体宽度自适应屏幕宽度，字段用响应式 grid 或分组，不使用窄 `max-w-*` 限制
@@ -1178,6 +1190,7 @@ class DemoPlugin(Plugin):
 
 - 优先复用用户触发指令消息或已有业务消息：指令状态用 `event.edit(...)`，题面进度用编辑原题面消息，答对奖励再回复答题者消息。
 - 模块进行中时，重复触发指令必须给出明确提示，并说明下一步：继续当前流程、等待超时、或使用 `stop` / `cancel` / `结束`。
+- 指令型模块必须提供帮助入口或帮助子命令，例如 `help` / `status` / 空参数展示帮助；帮助内容要显示当前配置的指令名和当前系统指令前缀。
 - 视觉题、图片题、文件题不要在文本说明、alt 文案、日志或 preview 中泄露答案；文本只说明规则和限时。
 - 避免连续发送多条含义重复的消息。降级发送时也要保证“同一事件只产生一个用户可见结果”。
 
@@ -1201,6 +1214,33 @@ class DemoPlugin(Plugin):
 - 群聊类模块建议提供消息清理策略，例如 `cleanup_mode` / `cleanup_delay_seconds` / `delete_command_message`，并允许用户选择保留记录。
 - 平台不支持编辑、删除、发媒体时，应降级为回复文本或普通发送；降级路径要写日志，并避免发送多条重复消息。
 - 可配置指令发生变化时，建议保留常用历史别名一段时间，或在重复触发/未知指令提示里告诉用户新指令。
+
+### 指令权限底线
+
+`owner_only` 不是“公开指令开关”。框架约定如下：
+
+- `commands` 只处理当前账号 outgoing 指令；普通群成员直接发送 `{prefix}{command}` 不会触发模块命令。
+- `owner_only=False` 只开放 `on_message`，用于答题、口令、领取码、关键词参与等普通消息监听。
+- 平台内部动作（自动回复、scheduler）如果需要触发指令，应通过内部命令派发能力执行，并把返回结果转成回复/普通发送；不要要求用户直接发送管理指令。
+- 指令 handler 内可以假设事件来自当前账号 outgoing 消息，因此可以优先 `event.edit(...)`；`on_message` 处理 incoming 消息时不要 `event.edit(...)`。
+
+示例模型：
+
+```text
+用户: 我想玩 24 点
+自动回复规则: 命中关键词后由 TelePilot 内部执行 "{prefix}24d 100"
+模块 commands: 本账号开局
+模块 on_message: 普通成员提交答案，答对后反馈奖励
+```
+
+不要这样做：
+
+```text
+用户: {prefix}24d 100
+模块: 直接开局
+```
+
+普通成员要参与流程，应发答案、口令或关键词，而不是发送系统指令。
 
 ### 消息发送能力边界
 
@@ -1312,6 +1352,27 @@ class QuizPlugin(Plugin):
 - 超时任务和答题消息同时结束一局：超时回调也要拿同一把锁，再二次检查。
 - 热重载没有清理状态：旧任务继续执行，和新模块实例抢状态。
 
+### 配置项完整性原则
+
+模块作者要尽量把“用户可能合理想改”的行为做成配置项，而不是写死在代码里。尤其是互动类、游戏类、生成类和通知类模块，至少检查这些能力是否需要外露：
+
+- 指令名：主指令、帮助子命令、取消/结束命令、撤销命令、管理子命令。
+- 自动删除：是否删除触发指令、是否删除中间状态、完成后多久清理、失败时是否保留排障信息。
+- 消息模板：帮助、开局、进行中、成功、失败、超时、取消、撤销、冷却、权限拒绝。
+- 交互策略：冷却时间、超时时间、是否引用原消息、是否保留历史别名、是否允许指定群启用。
+- 输出行为：HTML/纯文本、是否展示详细错误、是否展示内部 ID、是否发送预览或来源说明。
+
+帮助模板必须支持 `{prefix}` 占位符。不要在帮助列表里硬编码 `,命令`，否则用户把系统指令前缀改成 `。`、`/` 或其它字符后，帮助会误导。推荐默认帮助模板写成：
+
+```text
+{prefix}{command} 100 - 开始一局
+{prefix}{command} status - 查看状态
+{prefix}{command} {help_command} - 查看帮助
+{prefix}{command} {cancel_command} - 取消当前流程
+```
+
+运行时渲染帮助时，`{prefix}` 应来自 `current_command_prefix()` 或平台注入的当前前缀；配置页预览时，`{prefix}` 应来自系统设置中的 `command_prefix`，拿不到时才用 `,` 兜底。
+
 ### 统一配置项命名与校验
 
 新增模块尽量复用以下字段名，减少前端、文档、Bot 指令和用户认知的分裂。
@@ -1319,6 +1380,8 @@ class QuizPlugin(Plugin):
 | 字段 | 类型 | 推荐默认值 | 推荐范围/校验 | 说明 |
 |------|------|------------|---------------|------|
 | `command` | string | 模块短名 | 1-32 字符，不含空白，支持中文 | 触发指令名，配合 `command_config_keys = {"command"}` |
+| `help_command` | string | `help` | 1-32 字符，不含空白 | 帮助子命令或独立帮助指令名 |
+| `help_message_template` | string | 内置模板 | 建议限制最大长度 | 帮助文本模板，必须支持 `{prefix}` 和 `{command}` |
 | `default_reward` | integer | `0` | `0` 到业务允许上限 | 可选默认奖励；抢答/下注类模块的单局奖励优先由指令参数传入 |
 | `timeout` | integer | `60` | 10-86400 秒 | 用户可理解的超时秒数；已有模块沿用该字段 |
 | `auto_next` | boolean | `false` | 布尔 | 游戏/任务结束后是否自动开下一轮 |
@@ -1327,9 +1390,12 @@ class QuizPlugin(Plugin):
 | `status_interval_seconds` | integer | `30` | 10-300 秒 | 状态编辑频率，避免频繁编辑触发风控 |
 | `cooldown_seconds` | integer | `0` | 0-3600 秒 | 聊天级或用户级冷却时间 |
 | `cleanup_delay_seconds` | integer | `0` | 0-86400 秒 | 流程结束后延迟清理临时消息 |
-| `end_commands` | array[string] | `["stop", "结束"]` | 每项 1-32 字符，不含空白 | 取消/强制结束指令别名 |
+| `cancel_commands` | array[string] | `["stop", "cancel", "结束"]` | 每项 1-32 字符，不含空白 | 取消/强制结束指令别名 |
+| `undo_command` | string | `undo` | 1-32 字符，不含空白 | 撤销上一步、撤回本轮或回滚最近动作的指令名 |
 | `allowed_chat_ids` | array[int] | `[]` | 留空表示不限制 | 限制模块只在指定聊天生效 |
 | `delete_command_message` | boolean | `false` | 布尔 | 指令完成后是否删除原指令 |
+| `auto_delete_enabled` | boolean | `false` | 布尔 | 是否自动删除模块产生的临时消息 |
+| `auto_delete_delay_seconds` | integer | `0` | 0-86400 秒 | 自动删除延迟；0 表示立即或不启用，按模块语义说明 |
 
 示例：
 
@@ -1375,7 +1441,7 @@ config_schema={
 }
 ```
 
-配置页只适合放长期稳定配置，例如 `command`、`timeout`、`auto_next`、`message_template`。像奖励金额、题目范围、下注金额这类单局动态参数，优先从指令参数读取，例如 `,game 100`，并在开局时冻结到本轮状态里。
+配置页只适合放长期稳定配置，例如 `command`、`help_command`、`cancel_commands`、`undo_command`、`timeout`、`auto_next`、`message_template`、`delete_command_message`、`auto_delete_enabled`。像奖励金额、题目范围、下注金额这类单局动态参数，优先从指令参数读取，例如 `{prefix}game 100`，并在开局时冻结到本轮状态里。
 
 ### 模板配置与占位符
 
@@ -1387,11 +1453,13 @@ config_schema={
 
 | 字段 | 说明 |
 |------|------|
+| `help_message_template` | 帮助/用法文案；必须支持 `{prefix}` 和 `{command}` |
 | `start_message_template` | 开局/题面文案 |
 | `progress_message_template` | 进行中状态文案 |
 | `success_message_template` | 答对/成功文案 |
 | `timeout_message_template` | 超时文案 |
 | `cancel_message_template` | 取消/结束文案 |
+| `undo_message_template` | 撤销/回滚成功文案 |
 | `error_message_template` | 可恢复错误文案 |
 
 占位符说明建议写进 `description`，并保持稳定：
@@ -1412,7 +1480,7 @@ config_schema={
 }
 ```
 
-`{prefix}` 是平台约定的系统级占位符，表示“系统设置 → 指令前缀”的当前值。运行时需要展示指令示例时，优先从 worker 的当前指令前缀读取；前端配置预览中应通过 `getSystemSettings().command_prefix` 注入示例上下文，接口未返回时才兜底使用 `,`。不要把逗号硬编码成固定前缀。
+`{prefix}` 是平台约定的系统级占位符，表示“系统设置 → 指令前缀”的当前值。运行时需要展示指令示例、帮助列表、错误提示里的用法示例时，优先从 worker 的当前指令前缀读取；前端配置预览中应通过 `getSystemSettings().command_prefix` 注入示例上下文，接口未返回时才兜底使用 `,`。不要把逗号硬编码成固定前缀。
 
 如果模块有专属配置页，建议提供只读预览：用户修改模板后，用示例上下文渲染一段 `template_preview`。预览应展示“模板 + 示例上下文”替换后的最终消息效果，而不是简单重复默认值或字段说明。没有专属页面时，也至少在字段描述里给出一条完整示例，避免用户猜最终效果。
 
@@ -1512,7 +1580,7 @@ await ctx.log(
 
 - 不要在日志里记录完整昵称、完整消息正文或隐私文本。
 - 真正记分前必须保证“首个答对”已经在锁内原子判定。
-- 奖励金额不建议作为抢答类模块的固定配置项；优先由触发指令携带，例如 `,game 100`。
+- 奖励金额不建议作为抢答类模块的固定配置项；优先由触发指令携带，例如 `{prefix}game 100`。
 - 开局时把本轮奖励写入局状态，例如 `RoundState.reward`；一局进行中不要再读取运行时可变配置，避免配置变更导致结算金额漂移。
 - 答对后建议两步反馈：先回复答对者消息发送纯文本奖励（如 `+100`），再编辑原题目消息追加答对者、正确答案、奖励金额、耗时等结算信息。
 - 图片题面模块必须在 `plugin.json` 和 `manifest.py` 的 `permissions` 中声明 `send_file`，并给发送的文件设置明确后缀名。

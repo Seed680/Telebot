@@ -18,6 +18,23 @@
 
 ---
 
+## [0.18.5] — 2026-05-18 · fixed · 模块指令权限边界收紧
+
+### Fixed
+- 移除 `owner_only=False` 模块的 incoming 公开指令旁路，确保模块 `commands` 只能由当前账号 outgoing 指令或平台内部动作触发；普通成员仍可通过 `on_message` 参与答题、口令、领取等流程。
+
+### Docs
+- 模块开发指南补充“指令权限底线”，明确 `owner_only=False` 只开放消息监听，不开放普通成员指令执行。
+- 模块开发指南补充配置项完整性要求，建议把帮助、撤销、取消、自动删除、冷却/超时和消息模板等用户常调行为配置化，并要求帮助模板支持 `{prefix}` 占位符。
+
+### Verification
+- `backend/.venv/bin/ruff check backend/app`
+- `backend/.venv/bin/python -m pytest backend/app/tests/test_plugin_loader.py backend/app/tests/test_auto_reply.py backend/app/tests/test_game24_plugin.py -q`
+- `cd backend && .venv/bin/python -m pytest`
+- `git diff --check`
+
+---
+
 ## [0.18.4] — 2026-05-18 · fixed · CI 后端 lint 收口
 
 ### Fixed

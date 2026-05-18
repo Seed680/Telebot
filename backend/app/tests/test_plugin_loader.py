@@ -29,7 +29,6 @@ from app.worker.plugins.loader import (
     _import_builtins,
     _manifest_compatible,
     _missing_plugin_error,
-    _parse_prefixed_command,
     load_plugins_for_account,
     reload_account_config,
 )
@@ -235,11 +234,6 @@ def test_clear_installed_module_cache_removes_pycache(monkeypatch, tmp_path) -> 
     assert not cache_dir.exists()
 
 
-def test_parse_prefixed_command_accepts_unicode_prefix() -> None:
-    assert _parse_prefixed_command("。cy 100", "。") == ("cy", ["100"])
-    assert _parse_prefixed_command(",cy 100", "。") is None
-
-
 def test_missing_plugin_error_uses_codex_image_builtin_hint() -> None:
     err, message = _missing_plugin_error("codex_image")
     assert "codex_image" in err
@@ -277,15 +271,21 @@ def test_manifest_min_telebot_version_kept_as_legacy_alias() -> None:
 
 
 @pytest.mark.asyncio
-async def test_public_incoming_plugin_command_dispatches(monkeypatch) -> None:
-    calls: list[tuple[list[str], int]] = []
+async def test_owner_only_false_incoming_command_text_does_not_dispatch_command(monkeypatch) -> None:
+    from app.worker.command import unregister_all_plugin_commands
+    from app.worker.plugins.base import _REGISTRY, register
+
+    command_calls: list[tuple[list[str], int]] = []
+    message_calls: list[str] = []
 
     async def handler(client, event, args, account_id, ctx):  # noqa: ANN001
-        calls.append((args, account_id))
+        command_calls.append((args, account_id))
 
+    @register
     class _PublicCommandPlugin(Plugin):
         key = "_test_public_command"
         display_name = "公开命令测试"
+        message_channels = {"incoming"}
         owner_only = False
         commands = {"cy": handler}
 
@@ -293,17 +293,51 @@ async def test_public_incoming_plugin_command_dispatches(monkeypatch) -> None:
         raw_text = "。cy 100"
         chat_id = -1001
         sender_id = 42
+        is_private = False
+        is_group = True
+        is_channel = False
 
-    state = loader_mod._AccountState(7)
-    ctx = PluginContext(account_id=7, feature_key="_test_public_command", client=object())
-    monkeypatch.setattr(loader_mod, "_current_command_prefix", lambda: "。")
+        async def get_chat(self):
+            return None
 
-    handled = await loader_mod._dispatch_public_plugin_command(
-        state, "_test_public_command", _PublicCommandPlugin(), ctx, _Event()
+    async def _on_message(self, ctx: PluginContext, event: Any) -> None:
+        message_calls.append(str(getattr(event, "raw_text", "")))
+
+    monkeypatch.setattr(_PublicCommandPlugin, "on_message", _on_message)
+    fake_db = _FakeDB(
+        accounts={7: _FakeAcc(id=7)},
+        humanize={7: None},
+        afs=[_FakeAF(account_id=7, feature_key="_test_public_command", enabled=True, config={})],
+        rules=[],
     )
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db))
+    monkeypatch.setattr(loader_mod, "_load_log_incoming_messages_setting", AsyncMock(return_value=False))
 
-    assert handled is True
-    assert calls == [(["100"], 7)]
+    captured: list[Any] = []
+
+    def _on(_filter):
+        def _wrap(fn):
+            captured.append(fn)
+            return fn
+
+        return _wrap
+
+    client = MagicMock()
+    client.on = _on
+    paused = asyncio.Event()
+    paused.set()
+
+    try:
+        await load_plugins_for_account(client, account_id=7, paused=paused, redis=_FakeRedis())
+        incoming_dispatch = captured[-1]
+        await incoming_dispatch(_Event())
+
+        assert command_calls == []
+        assert message_calls == ["。cy 100"]
+    finally:
+        loader_mod._STATES.pop(7, None)
+        _REGISTRY.pop("_test_public_command", None)
+        unregister_all_plugin_commands(owner_plugin_key="_test_public_command")
 
 
 # ─────────────────────────────────────────────────────

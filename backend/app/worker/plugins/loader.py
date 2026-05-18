@@ -59,7 +59,7 @@ from ...redis_client import get_redis
 from ...services.rate_limit_service import get_effective
 from ...settings import settings as app_settings
 from ...util.sudo_permissions import sudo_chat_allowed
-from ..command import get_command_context, register_plugin_command, unregister_plugin_command
+from ..command import register_plugin_command, unregister_plugin_command
 from ..ipc import RUNTIME_LOG_STREAM, RuntimeLogPayload
 from ..ratelimit.engine import RateLimitEngine
 from ..ratelimit.humanize import HumanizeOpts
@@ -502,63 +502,6 @@ async def _event_allowed_for_owner_only(state: _AccountState, event: Any) -> boo
     return True
 
 
-def _current_command_prefix() -> str:
-    try:
-        ctx = get_command_context()
-        if ctx is not None and ctx.command_prefix:
-            return str(ctx.command_prefix)
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        from ...settings import settings  # noqa: PLC0415
-
-        return settings.command_prefix or ","
-    except Exception:  # noqa: BLE001
-        return ","
-
-
-def _parse_prefixed_command(text: str, prefix: str) -> tuple[str, list[str]] | None:
-    if not prefix:
-        return None
-    pattern = re.compile(rf"^{re.escape(prefix)}(\S+)(?:\s+(.*))?$", re.S)
-    match = pattern.match(text or "")
-    if match is None:
-        return None
-    cmd = match.group(1)
-    args_raw = (match.group(2) or "").strip()
-    return cmd, args_raw.split() if args_raw else []
-
-
-async def _dispatch_public_plugin_command(
-    state: _AccountState,
-    fkey: str,
-    inst: Plugin,
-    ctx: PluginContext,
-    event: Any,
-) -> bool:
-    """让 owner_only=False 的插件命令可由群内 incoming 消息触发。"""
-    if getattr(inst, "owner_only", True):
-        return False
-    parsed = _parse_prefixed_command(getattr(event, "raw_text", "") or "", _current_command_prefix())
-    if parsed is None:
-        return False
-    cmd, args = parsed
-    commands = getattr(inst, "commands", None) or getattr(type(inst), "commands", None) or {}
-    fn = commands.get(cmd)
-    if fn is None:
-        return False
-    if ctx.log:
-        await ctx.log(
-            "info",
-            f"[{fkey}] 收到公开插件命令：{cmd}",
-            command=cmd,
-            chat_id=getattr(event, "chat_id", None),
-            sender_id=getattr(event, "sender_id", None),
-        )
-    await fn(ctx.client or state.client, event, args, state.account_id, ctx)
-    return True
-
-
 # ─────────────────────────────────────────────────────
 # 主入口：load_plugins_for_account
 # ─────────────────────────────────────────────────────
@@ -690,10 +633,6 @@ async def load_plugins_for_account(
                 if ctx.generation != state.generation:
                     continue
                 try:
-                    if direction == "incoming" and await _dispatch_public_plugin_command(
-                        state, fkey, inst, ctx, event
-                    ):
-                        continue
                     await inst.on_message(ctx, event)
                 except Exception as exc:  # noqa: BLE001
                     await _log(
