@@ -1335,6 +1335,31 @@ async def test_run_template_forward_to_success() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_template_forward_to_delete_immediately_skips_success_edit() -> None:
+    """delete_immediately=True 时，不再编辑成功提示，直接删命令消息。"""
+    import asyncio as _aio
+
+    tpl = {
+        "name": "f",
+        "type": "forward_to",
+        "config": {"target_chat_id": 4242, "delete_immediately": True},
+    }
+    client = AsyncMock()
+    event = AsyncMock()
+    event.chat_id = 4242
+    replied = AsyncMock()
+    replied.forward_to = AsyncMock(return_value=None)
+    event.get_reply_message = AsyncMock(return_value=replied)
+    event.delete = AsyncMock(return_value=None)
+
+    await wcmd._run_template(client, event, [], tpl, account_id=1)
+    await _aio.sleep(0)
+
+    event.edit.assert_not_called()
+    event.delete.assert_awaited()
+
+
+@pytest.mark.asyncio
 async def test_run_template_forward_to_default_target_uses_event_chat() -> None:
     """target_chat_id 缺省 / 空串 → 用触发消息的 chat_id 作为转发目标。"""
     for cfg in ({}, {"target_chat_id": ""}, {"target_chat_id": None}):

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.db.models.account_bot import AccountBot
+from app.db.models.log import RuntimeLog
 from app.schemas.account_bot import AccountBotConfigUpdate
 from app.services import account_bot_runtime, account_bot_service
 
@@ -329,3 +330,34 @@ async def test_toggle_feature_operator_cannot_toggle_remote_plugin(monkeypatch) 
     assert answer.await_count == 1
     assert answer.await_args.kwargs.get("show_alert") is True
     assert "仅 admin" in answer.await_args.kwargs.get("text")
+
+
+@pytest.mark.asyncio
+async def test_notify_runtime_log_deduplicates_same_error(monkeypatch) -> None:
+    class _Redis:
+        def __init__(self) -> None:
+            self.keys: set[str] = set()
+
+        async def set(self, key: str, _value: str, *, ex: int, nx: bool) -> bool | None:
+            assert ex == account_bot_runtime._RUNTIME_NOTIFY_DEDUPE_TTL_SECONDS
+            assert nx is True
+            if key in self.keys:
+                return None
+            self.keys.add(key)
+            return True
+
+    redis = _Redis()
+    notify = AsyncMock(return_value=1)
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime, "notify_account", notify)
+
+    row = RuntimeLog(
+        account_id=7,
+        level="error",
+        source="plugin",
+        message="配置错误：x",
+    )
+    await account_bot_runtime.notify_runtime_log(row)
+    await account_bot_runtime.notify_runtime_log(row)
+
+    assert notify.await_count == 1

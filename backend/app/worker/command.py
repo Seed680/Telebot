@@ -1154,8 +1154,6 @@ async def _run_template(client, event, args, tpl: dict[str, Any], account_id: in
         except Exception as e:  # noqa: BLE001
             await event.edit(f"✗ 转发失败：{type(e).__name__}: {str(e)[:80]}")
             return
-        mode_label = {"forward_native": "转发", "copy_text": "复制文本", "quote": "引用转发", "link_only": "链接"}.get(mode, mode)
-        await event.edit(f"✓ 已{mode_label}到 {target}")
         # 自动删除命令消息
         delete_immediately = cfg.get("delete_immediately")
         if delete_immediately:
@@ -1169,6 +1167,8 @@ async def _run_template(client, event, args, tpl: dict[str, Any], account_id: in
 
             _aio.create_task(_delete_now())
         else:
+            mode_label = {"forward_native": "转发", "copy_text": "复制文本", "quote": "引用转发", "link_only": "链接"}.get(mode, mode)
+            await event.edit(f"✓ 已{mode_label}到 {target}")
             delete_after_raw = cfg.get("delete_after")
             if delete_after_raw:
                 try:

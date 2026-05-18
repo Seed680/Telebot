@@ -58,6 +58,8 @@ _CONFIRM_PREFIX = "account_bot_confirm:"
 _CONFIRM_TTL_SECONDS = 300
 _MAX_BUTTON_ROWS = 24
 _REMOTE_POLICY_HINT = "该功能默认关闭，请管理员在 Web 控制台启用后重试（高风险操作，仍需二次确认）。"
+_RUNTIME_NOTIFY_DEDUPE_TTL_SECONDS = 180
+_RUNTIME_NOTIFY_DEDUPE_PREFIX = "account_bot:runtime_notify:"
 
 
 async def _load_command_prefix(db) -> str:
@@ -252,6 +254,22 @@ async def notify_runtime_log(row: RuntimeLog) -> None:
         return
     source = account_bot_service.html_text(row.source or "worker")
     message = account_bot_service.html_text(row.message)
+    digest = hashlib.sha256(
+        f"{int(row.account_id)}|{row.level}|{row.source or 'worker'}|{row.message}".encode("utf-8")
+    ).hexdigest()
+    dedupe_key = f"{_RUNTIME_NOTIFY_DEDUPE_PREFIX}{int(row.account_id)}:{digest}"
+    redis = get_redis()
+    try:
+        first_hit = await redis.set(
+            dedupe_key,
+            "1",
+            ex=_RUNTIME_NOTIFY_DEDUPE_TTL_SECONDS,
+            nx=True,
+        )
+    except Exception:  # noqa: BLE001
+        first_hit = True
+    if not first_hit:
+        return
     await notify_account(
         int(row.account_id),
         f"⚠️ <b>账号运行告警</b>\n来源：<code>{source}</code>\n内容：{message}",

@@ -218,9 +218,9 @@ export function BotTab({ aid }: { aid: number }) {
             <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
               安全提示：涉及重启、安装等危险操作时，需在 Telegram 内完成二次确认后才会执行。
             </div>
-            <div className="space-y-3 rounded-md border border-red-300 bg-red-50 px-3 py-3">
-              <div className="text-sm font-medium text-red-900">远程模块高风险开关（admin）</div>
-              <div className="text-xs text-red-800">
+            <div className="space-y-3 rounded-md border border-red-300/70 bg-red-50 px-3 py-3 dark:border-red-400/40 dark:bg-red-950/30">
+              <div className="text-sm font-medium text-red-900 dark:text-red-100">远程模块高风险开关（admin）</div>
+              <div className="text-xs text-red-800 dark:text-red-200">
                 默认全部关闭；即使开启后，Telegram 内仍需二次确认才会执行 install/update/uninstall/第三方启停。
               </div>
               <div className="grid gap-2 text-sm md:grid-cols-2">
@@ -231,7 +231,10 @@ export function BotTab({ aid }: { aid: number }) {
                   ["uninstall", "允许 uninstall"],
                   ["enable_disable", "允许第三方 enable/disable"],
                 ].map(([key, label]) => (
-                  <label key={key} className="flex items-center justify-between rounded border bg-white px-3 py-2">
+                  <label
+                    key={key}
+                    className="flex items-center justify-between rounded border border-red-200/70 bg-white/95 px-3 py-2 text-red-950 dark:border-red-300/30 dark:bg-red-950/10 dark:text-red-100"
+                  >
                     <span>{label}</span>
                     <Switch
                       checked={remotePolicy[key as keyof AccountBotRemotePluginPolicy]}

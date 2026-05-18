@@ -1,9 +1,9 @@
-"""忽略 peer 名单 + 最近活跃 peer LRU 的单元测试。
+"""允许 peer 名单（沿用 ignored_peer 表）+ 最近活跃 peer LRU 的单元测试。
 
 覆盖：
 - ``_record_recent_peer`` 写入 + LRU 上限 + move_to_end 行为
-- ``_dispatch`` 在 ``ignored_peers`` 命中时短路，不调插件
-- ``_dispatch`` 不命中时正常派发到插件
+- ``_dispatch`` 在允许名单非空且不命中时短路，不调插件
+- ``_dispatch`` 在允许名单命中时正常派发到插件
 - ``reload_ignored_peers`` 从 fake DB 重新拉名单
 - ``get_recent_peers`` 反向输出（最新在前）
 - ``IgnoredPeerCreate.normalized_kind`` 异常 kind 归一化为 private
@@ -284,11 +284,11 @@ async def test_reload_ignored_peers_silent_when_no_state(monkeypatch) -> None:
 
 
 # ─────────────────────────────────────────────────────
-# 用例 5：_dispatch 在忽略命中时短路，不调用插件
+# 用例 5：_dispatch 在允许名单未命中时短路，不调用插件
 # ─────────────────────────────────────────────────────
 @pytest.mark.asyncio
-async def test_dispatch_skips_ignored_peer(monkeypatch) -> None:
-    """ignored_peers 中的 chat_id 进来时，on_message 不应被调用。"""
+async def test_dispatch_skips_peer_not_in_allowed_list(monkeypatch) -> None:
+    """允许名单非空时，不在名单里的 chat_id 进来应被丢弃。"""
 
     @register
     class _SpyPlugin(Plugin):
@@ -338,21 +338,21 @@ async def test_dispatch_skips_ignored_peer(monkeypatch) -> None:
 
     await load_plugins_for_account(client, account_id=1, paused=paused, redis=redis)
     state = loader_mod._STATES[1]
-    # 名单应已加载到 set
+    # 允许名单应已加载到 set
     assert -1001234 in state.ignored_peers
 
     dispatch = captured["dispatch"]
-    # 命中：插件不应被调用
+    # 未命中允许名单：插件不应被调用
     _SpyPlugin.on_message_calls = 0
-    await dispatch(_FakeEvent(chat_id=-1001234, is_group=True))
+    await dispatch(_FakeEvent(chat_id=-1009999, is_group=True))
     assert _SpyPlugin.on_message_calls == 0
     # 同时 recent_peers 仍然应该记录到了（早退发生在记录之后）
-    assert -1001234 in state.recent_peers
+    assert -1009999 in state.recent_peers
 
 
 @pytest.mark.asyncio
-async def test_dispatch_passes_through_when_not_ignored(monkeypatch) -> None:
-    """不在忽略名单的 chat_id 应当正常派发到插件。"""
+async def test_dispatch_passes_through_when_in_allowed_list(monkeypatch) -> None:
+    """在允许名单内的 chat_id 应当正常派发到插件。"""
 
     @register
     class _SpyPlugin(Plugin):
@@ -377,7 +377,7 @@ async def test_dispatch_passes_through_when_not_ignored(monkeypatch) -> None:
         last_error: str | None = None
 
     fake_db = _FakeDB(
-        ignored_rows=[_FakeIgnored(-100777)],   # 名单里只有这个
+        ignored_rows=[_FakeIgnored(-100777)],   # 允许名单里只有这个
         afs=[_FakeAF(account_id=2, feature_key="_test_ignored_spy_2")],
     )
     monkeypatch.setattr(
@@ -402,6 +402,6 @@ async def test_dispatch_passes_through_when_not_ignored(monkeypatch) -> None:
 
     dispatch = captured["dispatch"]
     _SpyPlugin.on_message_calls = 0
-    # 一个完全不在忽略名单的 peer
-    await dispatch(_FakeEvent(chat_id=42, is_private=True))
+    # 在允许名单里的 peer
+    await dispatch(_FakeEvent(chat_id=-100777, is_group=True))
     assert _SpyPlugin.on_message_calls == 1

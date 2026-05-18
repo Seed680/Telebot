@@ -18,6 +18,23 @@
 
 ---
 
+## [0.18.8] — 2026-05-19 · fixed · 允许群组白名单与 Bot 联动稳定性修复
+
+### Changed
+- 账号详情原“忽略群组”重做为“允许群组”白名单语义：名单为空时默认允许全部；名单非空时仅放行名单内会话触发 incoming 流程。
+- 账号详情对应 Tab 与说明文案同步改为“允许群组 / 已允许会话”，避免黑白名单语义混淆。
+- 自定义指令模板 `forward_to` 配置文案补充明确：当“触发后自动删除指令消息”为留空或 `0` 时，会保留并编辑原指令消息展示成功提示。
+
+### Fixed
+- 修复账号 Bot 联动页“远程模块高风险开关”在深色模式下文字不可读的问题，卡片与行项颜色已适配暗色主题。
+- 修复 `forward_to` 指令在“成功后立即删除指令消息”场景下仍先编辑成功提示的多余风险；现改为直接删除，不再编辑。
+- 为账号运行告警通知增加短时去重节流，避免插件配置错误反复触发时出现轰炸式重复通知。
+
+### Verification
+- `backend/.venv/bin/python -m pytest backend/app/tests/test_ignored_peers.py backend/app/tests/test_commands.py backend/app/tests/test_account_bot.py -q`
+
+---
+
 ## [0.18.7] — 2026-05-18 · fixed · 远程模块启用与部署更新体验修复
 
 ### Added

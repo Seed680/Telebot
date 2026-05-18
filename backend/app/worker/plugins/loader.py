@@ -571,7 +571,7 @@ async def load_plugins_for_account(
         except Exception:  # noqa: BLE001
             log.exception("注入平台调度器 engine 失败 account=%s", account_id)
 
-    # ── 1.5) 拉取忽略 peer 名单 ──
+    # ── 1.5) 拉取允许 peer 名单（沿用 ignored_peer 表存储） ──
     await _load_ignored_peers(state)
 
     # ── 2) 全局事件派发 ──
@@ -584,13 +584,14 @@ async def load_plugins_for_account(
             if state.paused is not None and not state.paused.is_set():
                 return
 
-            # incoming 消息需要 ignored_peer 检查和 LRU 维护
+            # incoming 消息需要允许名单检查和 LRU 维护
             if direction == "incoming":
                 pid = event.chat_id
                 if pid is not None:
                     await _record_recent_peer(state, event)
-                    if pid in state.ignored_peers:
-                        log.debug("[ignored] account=%s chat_id=%s", account_id, pid)
+                    # 白名单模式：配置为空 = 放行全部；非空 = 仅放行名单内会话
+                    if state.ignored_peers and pid not in state.ignored_peers:
+                        log.debug("[allowed] drop account=%s chat_id=%s", account_id, pid)
                         return
                 # 调试日志：每条 incoming 消息记一行；
                 # 默认关闭，small VPS 上活跃账号能产生数百条/分钟。
@@ -1258,12 +1259,12 @@ def registered_plugins() -> dict[str, type[Plugin]]:
 
 
 # ─────────────────────────────────────────────────────
-# Sprint2 #3：忽略 peer + 最近活跃 peer
+# Sprint2 #3：允许 peer（沿用 ignored_peer 表）+ 最近活跃 peer
 # ─────────────────────────────────────────────────────
 async def _load_ignored_peers(state: _AccountState) -> None:
-    """从 ``ignored_peer`` 表把当前账号的所有 peer_id 装进内存 set。
+    """从 ``ignored_peer`` 表把当前账号的所有 peer_id 装进内存 set（允许名单语义）。
 
-    任何异常都吞掉——失败时退化为"空名单"，等价于不忽略，业务侧不至于挂。
+    任何异常都吞掉——失败时退化为"空名单"，等价于允许全部，业务侧不至于挂。
     """
     try:
         async with AsyncSessionLocal() as db:
@@ -1276,7 +1277,7 @@ async def _load_ignored_peers(state: _AccountState) -> None:
             ).scalars().all()
         state.ignored_peers = {int(pid) for pid in rows}
     except Exception:  # noqa: BLE001
-        log.exception("加载忽略名单失败 account=%s", state.account_id)
+        log.exception("加载允许名单失败 account=%s", state.account_id)
         state.ignored_peers = set()
 
 
@@ -1348,7 +1349,7 @@ async def reload_ignored_peers(account_id: int) -> None:
         redis,
         account_id,
         "info",
-        f"忽略名单已热更新（共 {len(state.ignored_peers)} 个 peer）",
+        f"允许群组名单已热更新（共 {len(state.ignored_peers)} 个 peer）",
     )
 
 

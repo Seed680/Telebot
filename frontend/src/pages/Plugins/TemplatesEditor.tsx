@@ -1126,7 +1126,7 @@ function CommandEditDialog({
                     placeholder="留空或 0 = 不删；如 5 = 5 秒后删指令消息"
                   />
                   <p className="text-xs text-muted-foreground">
-                    转发成功后等待 N 秒，删除你刚发的 <CommandBadge>{cmdPrefix}{form.name || "name"}</CommandBadge> 指令消息（不影响转过去的内容）。范围 0–3600；不删保留 ✓ 提示。
+                    转发成功后等待 N 秒，删除你刚发的 <CommandBadge>{cmdPrefix}{form.name || "name"}</CommandBadge> 指令消息（不影响转过去的内容）。范围 0–3600；留空或 0 = 不删，并会编辑原指令消息显示 ✓ 成功提示。
                   </p>
                 </div>
               )}

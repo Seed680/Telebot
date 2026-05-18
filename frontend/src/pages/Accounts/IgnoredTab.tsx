@@ -1,4 +1,4 @@
-// 账号详情 → 忽略 tab：左侧最近活跃会话（一键加入），右侧已忽略列表（手填+移除）
+// 账号详情 → 允许群组 tab：左侧最近活跃会话（一键加入），右侧已允许列表（手填+移除）
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -49,7 +49,7 @@ function timeAgo(epochSec: number): string {
 export function IgnoredTab({ aid }: { aid: number }) {
   const qc = useQueryClient();
 
-  // ── 数据：账号状态 + 最近活跃 + 已忽略 ──
+  // ── 数据：账号状态 + 最近活跃 + 已允许 ──
   // 拉一次账号状态用于"为什么最近活跃为空"的精准引导：
   //   - paused / login_required → "账号未运行，先到概览启动"
   //   - active 但列表空        → "worker 在线但近期没有 incoming 消息"
@@ -73,19 +73,18 @@ export function IgnoredTab({ aid }: { aid: number }) {
   const recentItems = recentQ.data?.items ?? [];
   const workerAlive = recentQ.data?.worker_alive ?? false;
 
-  // 把已忽略 peer_id 抽成 Set，便于"最近活跃"列表过滤
+  // 把已允许 peer_id 抽成 Set，便于"最近活跃"列表过滤
   const ignoredSet = useMemo(
     () => new Set((ignoredQ.data ?? []).map((x) => x.peer_id)),
     [ignoredQ.data],
   );
 
-  // 已忽略的 peer 不再出现在"最近活跃"——加入忽略后立刻消失，避免"我已经忽略它了
-  // 怎么还在列表里"那种困惑。要查已忽略列表去右侧"已忽略会话"卡片。
+  // 已允许的 peer 不再出现在"最近活跃"——加入允许后立刻消失，避免重复添加。
   const visibleRecentItems = useMemo(
     () => recentItems.filter((p) => !ignoredSet.has(p.peer_id)),
     [recentItems, ignoredSet],
   );
-  // 被过滤掉的数量——空状态文案要告诉用户"不是没有最近活跃，是全被忽略了"
+  // 被过滤掉的数量——空状态文案要告诉用户"不是没有最近活跃，是都已加入允许名单"
   const hiddenIgnoredCount = recentItems.length - visibleRecentItems.length;
 
   // ── mutation ──
@@ -96,7 +95,7 @@ export function IgnoredTab({ aid }: { aid: number }) {
       peer_label?: string | null;
     }) => addIgnoredPeer(aid, vars),
     onSuccess: () => {
-      toast.success("已加入忽略名单");
+      toast.success("已加入允许名单");
       qc.invalidateQueries({ queryKey: ["ignored-peers", aid] });
     },
     onError: (err) => toast.error(getErrMsg(err)),
@@ -111,7 +110,7 @@ export function IgnoredTab({ aid }: { aid: number }) {
     onError: (err) => toast.error(getErrMsg(err)),
   });
 
-  // ── 手填 peer_id 加入 ──
+  // ── 手填 peer_id 加入允许名单 ──
   const [manualId, setManualId] = useState("");
   const [manualKind, setManualKind] = useState<PeerKind | "">("");
   const handleAddManual = () => {
@@ -184,14 +183,14 @@ function RecentCard({
   items: RecentPeerItem[];
   accountStatus?: string;
   workerAlive: boolean;
-  /** 已忽略而被过滤掉的条数；用于空状态文案精准引导 */
+  /** 已允许而被过滤掉的条数；用于空状态文案精准引导 */
   hiddenIgnoredCount: number;
   onAdd: (p: RecentPeerItem) => void;
   adding: boolean;
 }) {
   // 三态空提示：
   //  - workerAlive=false                → "worker 没在跑，去暂停 → 启动一次"
-  //  - workerAlive=true 且 全部已忽略       → "都在右侧已忽略列表里，看那边"
+  //  - workerAlive=true 且 全部已允许       → "都在右侧已允许列表里，看那边"
   //  - workerAlive=true 且 真没消息         → "worker 在跑，让别人发条消息试试"
   const emptyHint = !workerAlive ? (
     <>
@@ -204,16 +203,16 @@ function RecentCard({
     </>
   ) : hiddenIgnoredCount > 0 ? (
     <>
-      最近 <span className="font-medium">{hiddenIgnoredCount}</span> 条活跃会话全部已在忽略名单。
+      最近 <span className="font-medium">{hiddenIgnoredCount}</span> 条活跃会话全部已在允许名单。
       <br />
-      <span className="text-xs">右侧"已忽略会话"可以查看 / 移除。</span>
+      <span className="text-xs">右侧"已允许会话"可以查看 / 移除。</span>
     </>
   ) : (
     <>
       worker 已在跑，但内存里还没有最近活跃会话。
       <br />
       <span className="text-xs">
-        让小号 / 群组里发条消息给这个账号试试；或在右侧手动输入 ID 加入忽略。
+        让小号 / 群组里发条消息给这个账号试试；或在右侧手动输入 ID 加入允许名单。
       </span>
     </>
   );
@@ -223,7 +222,7 @@ function RecentCard({
       <CardHeader>
         <CardTitle className="text-base">最近活跃会话</CardTitle>
         <CardDescription className="flex items-center gap-2">
-          worker 内存中最近 50 个 incoming 会话；已忽略的不再出现在这里
+          worker 内存中最近 50 个 incoming 会话；已加入允许名单的不再出现在这里
           {!loading ? (
             workerAlive ? (
               <Badge
@@ -277,7 +276,7 @@ function RecentCard({
                   disabled={adding}
                   onClick={() => onAdd(p)}
                 >
-                  加入忽略
+                  加入允许
                 </Button>
               </li>
             ))}
@@ -288,7 +287,7 @@ function RecentCard({
   );
 }
 
-// ── 右卡片：已忽略 ──
+// ── 右卡片：已允许 ──
 function IgnoredCard({
   loading,
   items,
@@ -315,9 +314,9 @@ function IgnoredCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">已忽略会话</CardTitle>
+        <CardTitle className="text-base">已允许会话</CardTitle>
         <CardDescription>
-          这些会话的所有 incoming 消息将被丢弃，不触发任何模块 / 指令、不消耗风控配额
+          白名单模式：列表为空时允许全部；列表非空时只允许这些会话触发 incoming 流程。
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -358,7 +357,7 @@ function IgnoredCard({
           </div>
         ) : items.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">
-            尚未忽略任何会话
+            允许名单为空：当前默认允许全部会话
           </p>
         ) : (
           <ul className="divide-y">

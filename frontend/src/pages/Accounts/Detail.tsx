@@ -259,7 +259,7 @@ export function AccountDetail() {
               <Network className="h-4 w-4" /> 出口/伪装
             </TabsTrigger>
             <TabsTrigger value="ignored" className="shrink-0 gap-1.5">
-              <Ban className="h-4 w-4" /> 忽略的群组
+              <Ban className="h-4 w-4" /> 允许群组
             </TabsTrigger>
           </TabsList>
         </div>
