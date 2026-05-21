@@ -6,8 +6,8 @@
 FROM node:22-alpine AS builder
 WORKDIR /app
 
-# 启用 corepack，使用与 lockfile 匹配的 pnpm 版本
-RUN corepack enable
+# 启用 corepack，并固定 pnpm 10，避免服务器构建时漂到 pnpm 11 后忽略 onlyBuiltDependencies。
+RUN corepack enable && corepack prepare pnpm@10.23.0 --activate
 
 # 仅拷贝清单先装依赖，命中构建缓存
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/.npmrc ./

@@ -18,6 +18,19 @@
 
 ---
 
+## [0.20.1] — 2026-05-21 · fixed · 前端 Docker pnpm 版本固定
+
+### Fixed
+- 固定前端 Docker 构建使用 `pnpm@10.23.0`，并在 `frontend/package.json` 声明 `packageManager`，避免 Corepack 自动拉取 pnpm 11 后忽略 `pnpm.onlyBuiltDependencies` 导致 `esbuild` 构建脚本被拦截。
+
+### Verification
+- `pnpm --dir frontend install --frozen-lockfile`
+- `pnpm --dir frontend exec tsc -b --pretty false`
+- `pnpm --dir frontend build`
+- `git diff --check`
+
+---
+
 ## [0.20.0] — 2026-05-21 · added · 交互 Bot 模块化与转账测试增强
 
 ### Changed
