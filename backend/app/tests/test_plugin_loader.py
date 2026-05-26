@@ -108,6 +108,12 @@ class _FakeInstalledPlugin:
     last_install_error: str | None = None
 
 
+@dataclass
+class _FakePluginGlobalConfig:
+    plugin_key: str
+    config: dict[str, Any]
+
+
 # ─────────────────────────────────────────────────────
 # Fake AsyncSession：拦截 db.get / db.execute / db.commit
 # ─────────────────────────────────────────────────────
@@ -122,6 +128,7 @@ class _FakeDB:
         rules: list[_FakeRule],
         features: dict[str, Any] | None = None,
         installed_plugins: dict[str, Any] | None = None,
+        plugin_global_configs: dict[str, Any] | None = None,
     ) -> None:
         self.accounts = accounts
         self.humanize = humanize
@@ -129,6 +136,7 @@ class _FakeDB:
         self.rules = rules
         self.features = features or {}
         self.installed_plugins = installed_plugins or {}
+        self.plugin_global_configs = plugin_global_configs or {}
         # 记录 update 调用，便于断言 state 改动
         self.update_calls: list[Any] = []
 
@@ -145,6 +153,8 @@ class _FakeDB:
             return self.features.get(pk)
         if name == "installed_plugin":
             return self.installed_plugins.get(pk)
+        if name == "plugin_global_config":
+            return self.plugin_global_configs.get(pk)
         return None
 
     async def execute(self, stmt):
@@ -1194,10 +1204,16 @@ async def test_reload_account_config_keeps_merged_defaults_stable(monkeypatch) -
                     "config_schema": {
                         "properties": {
                             "command": {"default": "dicegrid"},
-                            "timeout": {"default": 90},
+                            "timeout": {"default": 90, "level": "global"},
                         }
                     }
                 },
+            )
+        },
+        plugin_global_configs={
+            "_test_config_stable": _FakePluginGlobalConfig(
+                plugin_key="_test_config_stable",
+                config={"timeout": 120},
             )
         },
     )
@@ -1217,7 +1233,7 @@ async def test_reload_account_config_keeps_merged_defaults_stable(monkeypatch) -
         before_generation = state.generation
         await reload_account_config(account_id=1)
 
-        assert startup_configs == [{"command": "ct", "timeout": 90}]
+        assert startup_configs == [{"command": "ct", "timeout": 120}]
         assert state.generation == before_generation + 1
         assert state.contexts["_test_config_stable"].generation == state.generation
         shutdown_spy.assert_not_awaited()

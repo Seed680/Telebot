@@ -10,9 +10,9 @@ API 层调本服务而不直接读写 ORM，便于以后引入更复杂的状态
 - worker 端 ``reload_account_config`` 也会刷新注册表后重激活，两侧相互独立。
 
 Global Config 设计：
-- global config 存储在 ``Feature.manifest["global_config"]`` 中，为所有账号共享。
+- global config 存储在 ``plugin_global_config`` 表中，为所有账号共享。
+- 兼容期内，如果新表缺行，会回退读取 ``Feature.manifest["global_config"]``。
 - 配置合并顺序：schema defaults < global config < account config。
-- 为将来迁移到独立表（如 PluginGlobalConfig）预留封装。
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from ..db.models.feature import (
     Feature,
 )
 from ..db.models.plugin import InstalledPlugin, PluginInstall
+from ..db.models.plugin_global_config import PluginGlobalConfig
 from ..db.models.remote_plugin import RemotePlugin
 from ..redis_client import get_redis
 from ..schemas.feature import (
@@ -439,20 +440,38 @@ async def _notify_reload(account_id: int) -> None:
 
 
 # ─────────────────────────────────────────────────────
-# Global Config（未来可迁移到独立表）
+# Global Config
 # ─────────────────────────────────────────────────────
+async def _read_plugin_global_config(
+    db: AsyncSession,
+    plugin_key: str,
+    feature: Feature | None = None,
+) -> dict[str, Any]:
+    """读取插件全局配置；新表缺行时回退旧 manifest 字段。"""
+
+    row = await db.get(PluginGlobalConfig, plugin_key)
+    if row is not None:
+        return dict(row.config or {})
+
+    if feature is None:
+        feature = await db.get(Feature, plugin_key)
+    if feature is None:
+        return {}
+    manifest = feature.manifest or {}
+    legacy_config = manifest.get("global_config", {})
+    return dict(legacy_config) if isinstance(legacy_config, dict) else {}
+
+
 async def get_plugin_global_config(db: AsyncSession, plugin_key: str) -> dict[str, Any]:
     """获取插件的 global config。
 
-    Global config 存储在 Feature.manifest["global_config"] 中。
-    返回空 dict 如果不存在。
+    优先读取 plugin_global_config；兼容期内新表缺行时回退旧 manifest 字段。
     """
     await seed_builtin_features(db)
     feature = await db.get(Feature, plugin_key)
     if feature is None:
         return {}
-    manifest = feature.manifest or {}
-    return manifest.get("global_config", {})
+    return await _read_plugin_global_config(db, plugin_key, feature)
 
 
 async def set_plugin_global_config(
@@ -463,7 +482,8 @@ async def set_plugin_global_config(
     """设置插件的 global config。
 
     - 验证 config 是否符合 config_schema（如果有）。
-    - 保存到 Feature.manifest["global_config"]。
+    - 保存到 plugin_global_config。
+    - 清理 Feature.manifest["global_config"] 旧字段，避免后续数据漂移。
     - 通知所有已启用该插件的账号的 worker reload。
 
     返回验证后的 config。
@@ -492,11 +512,19 @@ async def set_plugin_global_config(
         # 如果没有 level 标记，全部视为 account config
         global_config = {}
 
-    # 更新 manifest
+    # 写入新表
+    row = await db.get(PluginGlobalConfig, plugin_key)
+    if row is None:
+        db.add(PluginGlobalConfig(plugin_key=plugin_key, config=global_config))
+    else:
+        row.config = global_config
+
+    # 清理旧 manifest 字段
     manifest = dict(feature.manifest or {})
-    manifest["global_config"] = global_config
-    feature.manifest = manifest
-    flag_modified(feature, "manifest")
+    if "global_config" in manifest:
+        manifest.pop("global_config", None)
+        feature.manifest = manifest
+        flag_modified(feature, "manifest")
     await db.commit()
 
     # 通知所有使用该插件的账号的 worker reload
@@ -537,7 +565,7 @@ async def get_effective_plugin_config(
         return {}
 
     config_schema = (feature.manifest or {}).get("config_schema")
-    global_config = (feature.manifest or {}).get("global_config", {})
+    global_config = await _read_plugin_global_config(db, plugin_key, feature)
 
     # 获取账号配置
     af = (

@@ -53,6 +53,7 @@ from ...db.models.feature import (
 )
 from ...db.models.ignored_peer import IgnoredPeer
 from ...db.models.plugin import PLUGIN_TRUST_ORPHAN, InstalledPlugin
+from ...db.models.plugin_global_config import PluginGlobalConfig
 from ...db.models.rule import Rule
 from ...db.models.system import SystemSetting
 from ...redis_client import get_redis
@@ -1275,7 +1276,8 @@ async def _merge_plugin_config(
 
     合并顺序：schema defaults < global config < account config
 
-    - global config 存储在 Feature.manifest["global_config"] 中
+    - global config 存储在 plugin_global_config 表中
+    - 新表缺行时兼容读取 Feature.manifest["global_config"]
     - 合并时只取 account_config 中非 global 字段
     """
     from ...db.models.feature import Feature
@@ -1287,7 +1289,12 @@ async def _merge_plugin_config(
 
     manifest = feature.manifest or {}
     config_schema = manifest.get("config_schema", {})
-    global_config = manifest.get("global_config", {})
+    global_row = await db.get(PluginGlobalConfig, feature_key)
+    if global_row is not None:
+        global_config = dict(global_row.config or {})
+    else:
+        legacy_config = manifest.get("global_config", {})
+        global_config = dict(legacy_config) if isinstance(legacy_config, dict) else {}
 
     # 提取 schema defaults
     defaults: dict[str, Any] = {}

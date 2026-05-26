@@ -9,10 +9,12 @@ import pytest
 
 from app.db.models.feature import FEATURE_STATE_DISABLED
 from app.db.models.plugin import InstalledPlugin
+from app.db.models.plugin_global_config import PluginGlobalConfig
 from app.schemas.feature import FeatureInfo
 from app.services.feature_service import (
     _seed_local_installed_features,
     feature_matrix,
+    get_effective_plugin_config,
     get_plugin_global_config,
     set_plugin_global_config,
     validate_config_against_schema,
@@ -392,18 +394,35 @@ class TestGetPluginGlobalConfig:
 
     @pytest.mark.asyncio
     async def test_returns_global_config_from_manifest(self) -> None:
-        """存在的插件应返回 manifest 中的 global_config。"""
+        """新表缺行时应回退读取 manifest 中的 global_config。"""
         feature = MagicMock()
         feature.manifest = {
             "global_config": {"time_limit": 60, "prize": 100},
         }
 
         db = AsyncMock()
-        db.get = AsyncMock(side_effect=[feature])  # seed_builtin_features 后再 get
+        db.get = AsyncMock(side_effect=[feature, None])
 
         with pytest.mock.patch("app.services.feature_service.seed_builtin_features", AsyncMock()):
             result = await get_plugin_global_config(db, "game24")
             assert result == {"time_limit": 60, "prize": 100}
+
+    @pytest.mark.asyncio
+    async def test_returns_global_config_from_table_first(self) -> None:
+        """plugin_global_config 有行时应优先于旧 manifest 字段。"""
+        feature = MagicMock()
+        feature.manifest = {
+            "global_config": {"time_limit": 60},
+        }
+        row = MagicMock()
+        row.config = {"time_limit": 120, "prize": 100}
+
+        db = AsyncMock()
+        db.get = AsyncMock(side_effect=[feature, row])
+
+        with pytest.mock.patch("app.services.feature_service.seed_builtin_features", AsyncMock()):
+            result = await get_plugin_global_config(db, "game24")
+            assert result == {"time_limit": 120, "prize": 100}
 
 
 class TestFeatureInfo:
@@ -463,8 +482,8 @@ class TestSetPluginGlobalConfig:
         assert len(result.errors) == 1
 
     @pytest.mark.asyncio
-    async def test_replaces_manifest_dict_when_saving_global_config(self) -> None:
-        """保存 global_config 时要替换 JSON dict，确保 SQLAlchemy 能识别变更。"""
+    async def test_saves_table_and_clears_manifest_global_config(self) -> None:
+        """保存 global_config 时写入新表，并清掉 manifest 旧字段。"""
         original_manifest = {
             "config_schema": {
                 "type": "object",
@@ -474,12 +493,14 @@ class TestSetPluginGlobalConfig:
                 },
             },
             "permissions": ["send_message"],
+            "global_config": {"global_field": 12},
         }
         feature = MagicMock()
         feature.manifest = original_manifest
 
         db = AsyncMock()
-        db.get = AsyncMock(return_value=feature)
+        db.get = AsyncMock(side_effect=[feature, None])
+        db.add = MagicMock()
         db.commit = AsyncMock()
 
         with (
@@ -495,9 +516,84 @@ class TestSetPluginGlobalConfig:
         assert result == {"global_field": 42}
         assert feature.manifest is not original_manifest
         assert feature.manifest["permissions"] == ["send_message"]
-        assert feature.manifest["global_config"] == {"global_field": 42}
-        assert "global_config" not in original_manifest
+        assert "global_config" not in feature.manifest
+        assert original_manifest["global_config"] == {"global_field": 12}
+        added_row = db.add.call_args.args[0]
+        assert isinstance(added_row, PluginGlobalConfig)
+        assert added_row.plugin_key == "demo"
+        assert added_row.config == {"global_field": 42}
         db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_updates_existing_global_config_row(self) -> None:
+        """已有 plugin_global_config 行时应原地更新。"""
+        feature = MagicMock()
+        feature.manifest = {
+            "config_schema": {
+                "type": "object",
+                "properties": {
+                    "global_field": {"type": "integer", "level": "global"},
+                },
+            },
+        }
+        row = MagicMock()
+        row.config = {"global_field": 12}
+
+        db = AsyncMock()
+        db.get = AsyncMock(side_effect=[feature, row])
+        db.add = MagicMock()
+        db.commit = AsyncMock()
+
+        with (
+            pytest.mock.patch("app.services.feature_service.seed_builtin_features", AsyncMock()),
+            pytest.mock.patch("app.services.feature_service._notify_all_accounts_using_feature", AsyncMock()),
+        ):
+            result = await set_plugin_global_config(
+                db,
+                "demo",
+                {"global_field": 42},
+            )
+
+        assert result == {"global_field": 42}
+        assert row.config == {"global_field": 42}
+        db.add.assert_not_called()
+        db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_effective_plugin_config_reads_global_config_table() -> None:
+    """最终生效配置应读取 plugin_global_config 表里的共享配置。"""
+
+    class Result:
+        def __init__(self, row):
+            self.row = row
+
+        def scalar_one_or_none(self):
+            return self.row
+
+    feature = MagicMock()
+    feature.manifest = {
+        "config_schema": {
+            "type": "object",
+            "properties": {
+                "global_field": {"type": "integer", "default": 10, "level": "global"},
+                "account_field": {"type": "integer", "default": 20},
+            },
+        }
+    }
+    global_row = MagicMock()
+    global_row.config = {"global_field": 100}
+    account_feature = MagicMock()
+    account_feature.config = {"account_field": 200}
+
+    db = AsyncMock()
+    db.get = AsyncMock(side_effect=[feature, global_row])
+    db.execute = AsyncMock(return_value=Result(account_feature))
+
+    with pytest.mock.patch("app.services.feature_service.seed_builtin_features", AsyncMock()):
+        result = await get_effective_plugin_config(db, 1, "demo")
+
+    assert result == {"global_field": 100, "account_field": 200}
 
 
 if __name__ == "__main__":
