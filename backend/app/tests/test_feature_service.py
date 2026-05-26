@@ -10,6 +10,7 @@ import pytest
 from app.db.models.feature import FEATURE_STATE_DISABLED
 from app.schemas.feature import FeatureInfo
 from app.services.feature_service import (
+    _seed_local_installed_features,
     feature_matrix,
     get_plugin_global_config,
     set_plugin_global_config,
@@ -272,6 +273,7 @@ async def test_feature_matrix_separates_enabled_switch_from_runtime_state(monkey
     db.execute = AsyncMock(
         side_effect=[
             Result([]),  # RemotePlugin
+            Result([]),  # PluginInstall
             Result([account]),
             Result([account_feature]),
         ],
@@ -282,6 +284,44 @@ async def test_feature_matrix_separates_enabled_switch_from_runtime_state(monkey
     row = data["accounts"][0]
     assert row["features"]["guess_number"] == FEATURE_STATE_DISABLED
     assert row["feature_enabled"]["guess_number"] is True
+
+
+@pytest.mark.asyncio
+async def test_seed_local_installed_features_skips_orphan_dirs(monkeypatch, tmp_path) -> None:
+    """磁盘孤儿目录不再写入模块矩阵；已有孤儿 feature 行会被清掉。"""
+
+    root = tmp_path / "installed"
+    plugin_dir = root / "orphan_demo"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.json").write_text(
+        '{"name":"orphan_demo","display_name":"孤儿模块","version":"1.0.0"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.settings.settings.plugins_installed_dir", str(root))
+
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+    existing_row = SimpleNamespace(key="orphan_demo", is_builtin=False)
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=[Result([]), Result([])])
+    db.delete = AsyncMock()
+
+    added, changed = await _seed_local_installed_features(
+        db,
+        {"orphan_demo": existing_row},
+    )
+
+    assert added == 0
+    assert changed is True
+    db.delete.assert_awaited_once_with(existing_row)
 
 
 # ─────────────────────────────────────────────────────

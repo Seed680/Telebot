@@ -14,6 +14,38 @@
 
 ## [Unreleased]
 
+_暂无。_
+
+## [0.25.0-rc.1] — 2026-05-27 · rc · 插件运行时安全基线与 AI/HTTP facade
+
+### Added
+- 新增插件安全 HTTP facade `PluginHTTP`，支持 `external_http` 权限、域名白名单、账号代理、响应体流式大小限制和基础 SSRF 防护，为后续 `ctx.http` 能力落地提供运行时基础。
+- 新增插件安全 AI facade `PluginAI`，仅对声明 `ai_text` 的插件注入 `ctx.ai`，复用现有 LLM fallback、usage 与账号预算链路，并向插件返回脱敏 Provider 元数据。
+- 新增插件 AI 配额预扣服务与插件 LLM 用量聚合 API，`ctx.ai` 调用会按插件/账号预扣 prompt + output token，并用 Redis 滚动窗口控制并发消耗；前端模块中心可展示插件消耗。
+- 模块中心新增来源/信任徽章与加载失败提示，可展示内置核心、签名通过、远程 Git、孤立目录、签名失败等状态。
+- 新增 `installed_plugin` 统一安装记录表的兼容迁移，并在 zip/Git/仓库/本地导入安装、更新、启停和卸载时同步安装记录，为后续切换运行时读新表做准备。
+- 新增 `examples/plugins/with_http` 与 `examples/plugins/with_ai` 示例及 CI 校验脚本，防止示例插件随 API 演进腐化。
+
+### Changed
+- 第三方 installed 插件加载改为统一授权入口，综合校验 `PluginInstall`、`RemotePlugin`、账号开关、签名状态和孤儿目录，避免不同安装路径绕过禁用状态。
+- `Manifest.permissions` 默认改为空列表，要求插件显式声明运行时权限；非 TelegramClient 能力由独立 facade 处理。
+- `feature_matrix` 增加插件来源、孤儿状态与签名状态字段，减少前端对模块来源的猜测。
+- 本地 `plugins/installed/*/plugin.json` 若没有安装记录会被视为孤儿目录，模块中心不再自动写入 feature 行；已有孤儿 feature 行会被清理。
+- `sum` 插件改为通过 `ctx.ai.complete()` 调用平台 LLM，不再直接 import 后端数据库和 LLM 私有服务。
+- installed 插件运行期收到的 Telegram event 会通过 `SandboxEvent` 包装，`event.reply/edit/delete/get_reply_message` 与 `event.client` 同样遵守 manifest 权限。
+- 远程/Git 插件安装更新新增静态 lint warning，提示私有 `app.db` / `app.services` import 与缺少 timeout 的 HTTP 调用，但本阶段只告警不阻断。
+
+### Fixed
+- 修复 zip 安装插件在 `PluginInstall.enabled=False` 或签名失败时仍可能被 worker 按其它状态路径加载的问题。
+- 修复磁盘存在但没有安装记录的孤儿插件缺少结构化失败状态的问题，现在会写回 `AccountFeature.state=failed` 和可读 `last_error`。
+- 修复已加载 installed 插件在全局授权失效后热更新时状态不同步的问题，reload 会卸载实例并写回 disabled/failed 状态。
+- 修复 installed 插件目录名、`MANIFEST.key` 与 `Plugin.key` 不一致时可能污染全局注册表的问题，import 失败也会回滚注册表副作用。
+- 修复 `ctx.http` 可通过请求级参数覆盖平台策略的问题，现在会拒绝自动重定向、请求级 timeout 和未白名单参数。
+- 修复插件 AI 配额只按输出上限预扣的问题，长 prompt 现在也会计入预扣估算；Redis 结算不再复活无 TTL 的过期 key。
+
+### Docs
+- 更新插件开发指南，修正远程模块 API、权限表、`codex_image` / `translate` 描述、`cleanup_mode` 语义，并补充 `ctx.http` / `ctx.ai` 当前使用方式。
+
 ## [0.24.2] — 2026-05-26 · patch · 插件配置页 AI 下拉与模板预览
 
 ### Changed

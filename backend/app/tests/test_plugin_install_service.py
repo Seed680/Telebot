@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 from app.db.models.feature import FEATURE_AUTO_REPLY
-from app.db.models.plugin import PluginInstall
+from app.db.models.plugin import InstalledPlugin, PluginInstall
 from app.services import plugin_install_service as pis
 
 
@@ -37,20 +37,27 @@ class _FakeDB:
 
     def __init__(self) -> None:
         self.rows: dict[str, PluginInstall] = {}
+        self.installed_rows: dict[str, InstalledPlugin] = {}
         self.committed = False
 
     async def get(self, model, pk):  # noqa: ANN001
         if model is PluginInstall:
             return self.rows.get(pk)
+        if model is InstalledPlugin:
+            return self.installed_rows.get(pk)
         return None
 
     def add(self, obj) -> None:  # noqa: ANN001
         if isinstance(obj, PluginInstall):
             self.rows[obj.key] = obj
+        elif isinstance(obj, InstalledPlugin):
+            self.installed_rows[obj.key] = obj
 
     async def delete(self, obj) -> None:  # noqa: ANN001
         if isinstance(obj, PluginInstall):
             self.rows.pop(obj.key, None)
+        elif isinstance(obj, InstalledPlugin):
+            self.installed_rows.pop(obj.key, None)
 
     async def flush(self) -> None:
         return None
@@ -265,6 +272,15 @@ async def test_install_zip_roundtrip(tmp_path, monkeypatch) -> None:
     assert (target / "manifest.py").is_file()
     assert (target / "plugin.py").is_file()
     assert "my_demo" in db.rows
+    installed = db.installed_rows["my_demo"]
+    assert installed.source == "zip"
+    assert installed.version == "1.0.0"
+    assert installed.installed_path == str(target)
+    assert installed.signature_ok is True
+    assert installed.trust_tier == "verified"
+    assert installed.source_label == "ZIP"
+    assert installed.last_install_error is None
+    assert installed.lint_warnings == []
 
 
 @pytest.mark.asyncio
@@ -287,6 +303,29 @@ async def test_install_zip_upgrade_keeps_enabled(tmp_path, monkeypatch) -> None:
     assert row2.version == "1.1.0"
     assert row2.enabled is True
     assert db.rows["upgr"].version == "1.1.0"
+    assert db.installed_rows["upgr"].enabled is True
+    assert db.installed_rows["upgr"].version == "1.1.0"
+
+
+@pytest.mark.asyncio
+async def test_install_zip_writes_lint_warnings_to_installed_plugin(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(pis.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+    extra = [
+        (
+            "extra.py",
+            b"import requests\nfrom app.services.auth_service import x\nrequests.get('https://example.com')\n",
+        )
+    ]
+    z = _make_zip(key="linted_zip", version="1.0.0", extra_members=extra)
+    sig, pub = _sign_payload(z)
+    monkeypatch.setattr(pis.settings, "plugin_pubkey", pub)
+    db = _FakeDB()
+
+    await pis.install_zip(db, zip_bytes=z, signature=sig)
+
+    warnings = db.installed_rows["linted_zip"].lint_warnings
+    assert any("app.services.auth_service" in item for item in warnings)
+    assert any("requests.get" in item and "timeout" in item for item in warnings)
 
 
 @pytest.mark.asyncio
@@ -340,6 +379,21 @@ async def test_set_enabled_blocks_when_signature_failed(tmp_path, monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_set_enabled_syncs_installed_plugin_row(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(pis.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+    z = _make_zip(key="toggle", version="1.0.0")
+    sig, pub = _sign_payload(z)
+    monkeypatch.setattr(pis.settings, "plugin_pubkey", pub)
+    db = _FakeDB()
+    await pis.install_zip(db, zip_bytes=z, signature=sig)
+
+    await pis.set_enabled(db, "toggle", True)
+
+    assert db.rows["toggle"].enabled is True
+    assert db.installed_rows["toggle"].enabled is True
+
+
+@pytest.mark.asyncio
 async def test_uninstall_removes_row_and_dir(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(pis.settings, "plugins_installed_dir", str(tmp_path / "installed"))
     db = _FakeDB()
@@ -353,6 +407,7 @@ async def test_uninstall_removes_row_and_dir(tmp_path, monkeypatch) -> None:
     deleted = await pis.uninstall(db, "bye")
     assert deleted is True
     assert "bye" not in db.rows
+    assert "bye" not in db.installed_rows
     assert not target.exists()
 
 

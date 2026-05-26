@@ -41,6 +41,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db.base import AsyncSessionLocal
 from ..db.models.account import Account
 from ..db.models.feature import FEATURE_STATE_DISABLED, AccountFeature, Feature
+from ..db.models.plugin import (
+    PLUGIN_SOURCE_GIT,
+    PLUGIN_TRUST_COMMUNITY,
+    InstalledPlugin,
+)
 from ..db.models.remote_plugin import RemotePlugin
 from ..db.models.system import SystemSetting
 from ..settings import settings
@@ -522,6 +527,53 @@ def _iter_manifest_string_literals(manifest_text: str):
             yield getattr(node, "lineno", 0), node.value
 
 
+def _is_forbidden_internal_import(name: str) -> bool:
+    return name == "app.db" or name.startswith("app.db.") or name == "app.services" or name.startswith("app.services.")
+
+
+def _lint_python_source_file(path: Path, plugin_dir: Path) -> list[str]:
+    warnings: list[str] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+    except Exception:  # noqa: BLE001
+        return warnings
+
+    rel = path.relative_to(plugin_dir)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if _is_forbidden_internal_import(alias.name):
+                    warnings.append(f"{rel}:line {node.lineno} 禁止直接 import 内部模块 {alias.name!r}")
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if _is_forbidden_internal_import(module):
+                warnings.append(f"{rel}:line {node.lineno} 禁止直接 import 内部模块 {module!r}")
+        elif isinstance(node, ast.Call):
+            func = node.func
+            call_name: str | None = None
+            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                call_name = f"{func.value.id}.{func.attr}"
+            if call_name and call_name.split(".", 1)[0] in {"httpx", "requests"}:
+                has_timeout = any(keyword.arg == "timeout" for keyword in node.keywords)
+                if not has_timeout:
+                    warnings.append(f"{rel}:line {node.lineno} {call_name} 调用缺少 timeout 参数")
+    return warnings
+
+
+def _lint_metadata_text_file(path: Path, plugin_dir: Path) -> list[str]:
+    warnings: list[str] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        return warnings
+    rel = path.relative_to(plugin_dir)
+    for needle in ("import app.db.", "from app.db.", "import app.services.", "from app.services."):
+        if needle in text:
+            warnings.append(f"{rel} 元数据疑似引用内部模块 {needle.strip()!r}")
+    return warnings
+
+
 def _warn_hardcoded_prefix(source: str, location: str, text: str) -> str | None:
     if "{prefix}" in text:
         return None
@@ -535,9 +587,9 @@ def _warn_hardcoded_prefix(source: str, location: str, text: str) -> str | None:
 
 
 def lint_plugin_metadata_files(plugin_dir: Path) -> list[str]:
-    """静态 lint plugin.json / manifest.py，发现疑似硬编码命令前缀时给 warning。
+    """静态 lint 插件源码/metadata，只给 warning，不阻断安装。
 
-    该 lint 只提示不阻断安装；manifest.py 只做 AST 解析，不执行任何代码。
+    manifest.py 只做 AST 解析，不执行任何代码。
     """
     warnings: list[str] = []
     pj = plugin_dir / "plugin.json"
@@ -562,12 +614,99 @@ def lint_plugin_metadata_files(plugin_dir: Path) -> list[str]:
         except Exception:  # noqa: BLE001
             pass
 
+    for metadata_file in (plugin_dir / "plugin.json", plugin_dir / "manifest.py"):
+        if metadata_file.is_file():
+            warnings.extend(_lint_metadata_text_file(metadata_file, plugin_dir))
+
+    for path in plugin_dir.rglob("*.py"):
+        if any(part in {".git", "__pycache__"} for part in path.relative_to(plugin_dir).parts):
+            continue
+        warnings.extend(_lint_python_source_file(path, plugin_dir))
+
     # 去重并限制数量，避免一个坏模板刷屏。
     unique: list[str] = []
     for item in warnings:
         if item not in unique:
             unique.append(item)
     return unique[:10]
+
+
+def _manifest_json_from_remote_meta(meta: PluginMetadata) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "name": meta.name,
+        "display_name": meta.display_name,
+        "description": meta.description,
+        "author": meta.author,
+        "version": meta.version,
+        "entry": meta.entry,
+        "permissions": list(meta.permissions),
+    }
+    if meta.config_schema is not None:
+        data["config_schema"] = meta.config_schema
+    if meta.min_telepilot_version:
+        data["min_telepilot_version"] = meta.min_telepilot_version
+    if meta.min_telebot_version:
+        data["min_telebot_version"] = meta.min_telebot_version
+    return data
+
+
+async def upsert_installed_plugin(
+    db: AsyncSession,
+    *,
+    key: str,
+    source: str,
+    manifest_json: dict[str, Any] | None,
+    installed_path: str | None,
+    source_url: str | None = None,
+    version: str = "0.0.0",
+    enabled: bool = False,
+    signature_ok: bool | None = None,
+    trust_tier: str = PLUGIN_TRUST_COMMUNITY,
+    source_label: str | None = None,
+    last_install_error: str | None = None,
+    lint_warnings: list[str] | None = None,
+) -> InstalledPlugin:
+    """双写统一安装记录表；legacy 表仍是当前运行时读源。"""
+    row = await db.get(InstalledPlugin, key)
+    if row is None:
+        row = InstalledPlugin(key=key, source=source)
+        db.add(row)
+    row.source = source
+    row.source_url = source_url
+    row.installed_path = installed_path
+    row.version = version or "0.0.0"
+    row.manifest_json = manifest_json
+    row.enabled = bool(enabled)
+    row.signature_ok = signature_ok
+    row.trust_tier = trust_tier
+    row.source_label = source_label
+    row.last_install_error = last_install_error
+    row.lint_warnings = list(lint_warnings or [])
+    return row
+
+
+async def set_installed_plugin_enabled(
+    db: AsyncSession,
+    key: str,
+    enabled: bool,
+) -> None:
+    """Keep additive ``installed_plugin`` rows in sync with legacy enable flags."""
+
+    row = await db.get(InstalledPlugin, key)
+    if row is None:
+        return
+    row.enabled = bool(enabled)
+    await db.flush()
+
+
+async def delete_installed_plugin_record(db: AsyncSession, key: str) -> None:
+    """Delete the additive unified install row when legacy install rows are removed."""
+
+    row = await db.get(InstalledPlugin, key)
+    if row is None:
+        return
+    await db.delete(row)
+    await db.flush()
 
 
 def _find_plugin_metadata_in_repo(repo_dir: Path, name: str) -> tuple[PluginMetadata, Path]:
@@ -888,6 +1027,22 @@ async def install(
             feat.manifest = _merge_feature_manifest_preserving_global_config(feat.manifest, meta)
 
         await db.flush()
+        await upsert_installed_plugin(
+            db,
+            key=final_name,
+            source=PLUGIN_SOURCE_GIT,
+            source_url=source_url,
+            installed_path=str(target),
+            version=meta.version,
+            manifest_json=_manifest_json_from_remote_meta(meta),
+            enabled=row.enabled,
+            signature_ok=None,
+            trust_tier=PLUGIN_TRUST_COMMUNITY,
+            source_label="Git",
+            last_install_error=None,
+            lint_warnings=lint_warnings,
+        )
+        await db.flush()
 
         # 如果 default_enabled=True，为所有已有账号启用
         if default_enabled:
@@ -945,6 +1100,7 @@ async def uninstall(db: AsyncSession, name: str) -> bool:
     if feat is not None:
         await db.delete(feat)
 
+    await delete_installed_plugin_record(db, name)
     await db.delete(row)
     await db.flush()
 
@@ -969,6 +1125,7 @@ async def set_enabled(
     if row is None:
         raise RemotePluginNotFound("PLUGIN_NOT_FOUND", f"插件不存在: {name}")
     row.enabled = bool(enabled)
+    await set_installed_plugin_enabled(db, name, row.enabled)
     if row.enabled and bootstrap_accounts:
         await _enable_for_all_accounts_if_unclaimed(db, name)
     await db.flush()
@@ -1073,6 +1230,21 @@ async def update(db: AsyncSession, name: str) -> RemotePlugin:
         feat.version = meta.version or feat.version
         feat.is_builtin = False
         feat.manifest = _merge_feature_manifest_preserving_global_config(feat.manifest, meta)
+    await upsert_installed_plugin(
+        db,
+        key=name,
+        source=PLUGIN_SOURCE_GIT,
+        source_url=row.source_url,
+        installed_path=str(target),
+        version=row.version,
+        manifest_json=_manifest_json_from_remote_meta(meta),
+        enabled=row.enabled,
+        signature_ok=None,
+        trust_tier=PLUGIN_TRUST_COMMUNITY,
+        source_label="Git",
+        last_install_error=None,
+        lint_warnings=lint_warnings,
+    )
     await db.flush()
 
     return row
@@ -1106,13 +1278,16 @@ __all__ = [
     "auto_update_check_loop",
     "check_remote_plugin_update",
     "check_updates",
+    "delete_installed_plugin_record",
     "disable",
     "enable",
     "get_by_name",
     "install",
     "list_installed",
     "set_enabled",
+    "set_installed_plugin_enabled",
     "trigger_reload",
     "uninstall",
     "update",
+    "upsert_installed_plugin",
 ]

@@ -30,6 +30,23 @@ export interface LLMUsageRecentResponse {
   summary: LLMUsageSummary;
 }
 
+export interface PluginLLMUsageSummaryItem {
+  plugin_key: string;
+  source: string;
+  request_count: number;
+  success_count: number;
+  failed_count: number;
+  total_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  avg_latency_ms: number;
+  last_used_at?: string | null;
+}
+
+export interface PluginLLMUsageSummaryResponse {
+  items: PluginLLMUsageSummaryItem[];
+}
+
 function buildSummaryFromItems(items: LLMUsageRecord[]): LLMUsageSummary {
   const requestCount = items.length;
   const successCount = items.filter((r) => r.success).length;
@@ -66,4 +83,14 @@ export async function listRecentLLMUsage(limit = 20): Promise<LLMUsageRecentResp
     items,
     summary: "summary" in data && data.summary ? data.summary : buildSummaryFromItems(items),
   };
+}
+
+export async function listPluginLLMUsageSummary(params?: {
+  plugin_key?: string;
+  limit?: number;
+}): Promise<PluginLLMUsageSummaryResponse> {
+  const { data } = await api.get<PluginLLMUsageSummaryResponse>("/api/llm/usage/plugins/summary", {
+    params,
+  });
+  return data;
 }

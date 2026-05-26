@@ -4,7 +4,8 @@
 - ``Plugin`` 是基类，所有内置 / 第三方插件继承它并通过 ``@register`` 注册到全局表。
 - 注册表存放的是 **类对象**（不是实例），每账号在 loader 里各自实例化一次，避免共享状态。
 - ``PluginContext`` 是给插件运行期使用的"上下文容器"：账号 id、配置、规则、Telethon
-      client、风控引擎、redis、日志写入器、平台调度器；插件实现各 hook 时只需读它就够了。
+      client、风控引擎、redis、日志写入器、平台调度器、安全 HTTP facade；
+      插件实现各 hook 时只需读它就够了。
 - 严格遵循 ``CONTRACTS.md`` 的"插件 Hook"段；所有 hook 默认实现为 no-op，子类按需重写。
 """
 
@@ -35,6 +36,8 @@ class PluginContext:
       - ``redis``：异步 Redis 客户端
       - ``log``：写运行日志的协程；签名 ``async (level, message, **detail)``
       - ``scheduler``：平台调度器 facade，可在插件内注册 cron / interval / once 任务
+      - ``http``：声明 ``external_http`` 和 ``allowed_hosts`` 后注入的安全 HTTP facade
+      - ``ai``：声明 ``ai_text`` 后注入的安全文本 LLM facade
 
     为避免循环 import，``rules`` / ``engine`` / ``redis`` 都用 ``Any`` 标注。
     """
@@ -48,6 +51,8 @@ class PluginContext:
     redis: Any = None  # redis.asyncio.Redis
     log: Callable[..., Awaitable[None]] | None = None
     scheduler: Any = None  # SchedulerFacade
+    http: Any = None  # PluginHTTP
+    ai: Any = None  # PluginAI
     generation: int = 0
     account_proxy_url: str | None = None
 
@@ -99,7 +104,8 @@ class Plugin:
     message_channels: set[str] = {"incoming"}
     # 默认只允许账号本人/授权 sudo 触发 on_message；需要处理群内普通成员消息的插件应显式设为 False
     owner_only: bool = True
-    # 插件想暴露的 TG 内命令：cmd_name -> async handler
+    # 插件想暴露的 TG 内命令：cmd_name -> async handler。
+    # 可变命令必须在 __init__ 里赋值为实例属性，避免修改类属性污染其它账号实例。
     # handler 签名: (client, event, args, account_id, ctx) -> None
     commands: dict[str, Callable[..., Awaitable[None]]] = {}
 

@@ -35,6 +35,7 @@ from ..db.models.feature import (
     AccountFeature,
     Feature,
 )
+from ..db.models.plugin import PluginInstall
 from ..db.models.remote_plugin import RemotePlugin
 from ..redis_client import get_redis
 from ..schemas.feature import (
@@ -157,6 +158,11 @@ async def _seed_local_installed_features(
     if not root.exists():
         return 0, False
 
+    plugin_install_rows = (await db.execute(select(PluginInstall))).scalars().all()
+    remote_plugin_rows = (await db.execute(select(RemotePlugin))).scalars().all()
+    installed_keys = {str(row.key) for row in plugin_install_rows}
+    remote_keys = {str(row.name) for row in remote_plugin_rows}
+
     added = 0
     changed = False
     for plugin_json in sorted(root.glob("*/plugin.json")):
@@ -168,6 +174,7 @@ async def _seed_local_installed_features(
         key = str(meta.get("name") or plugin_json.parent.name).strip()
         if not key or "/" in key or "\\" in key:
             continue
+        is_orphan = key not in installed_keys and key not in remote_keys
         display_name = str(meta.get("display_name") or key)
         version = str(meta.get("version") or "") or None
         cfg_schema = meta.get("config_schema")
@@ -181,6 +188,20 @@ async def _seed_local_installed_features(
         interaction_entries = raw_entries if isinstance(raw_entries, list) else []
         tags = meta.get("tags") or []
         experimental = bool(meta.get("experimental")) or "experimental" in tags
+        if is_orphan:
+            row = existing.get(key)
+            if row is not None and not row.is_builtin:
+                try:
+                    await db.delete(row)
+                    existing.pop(key, None)
+                    changed = True
+                except Exception:  # noqa: BLE001
+                    log.warning("清理孤立 installed 模块 feature 行失败: %s", key, exc_info=True)
+            log.warning(
+                "跳过孤立 installed 模块 %s：磁盘存在 plugin.json，但没有安装记录",
+                key,
+            )
+            continue
         manifest: dict[str, Any] = {}
         if cfg_schema:
             manifest["config_schema"] = cfg_schema
@@ -193,6 +214,8 @@ async def _seed_local_installed_features(
             manifest["x-experimental"] = True
         if meta.get("permissions"):
             manifest["permissions"] = list(meta.get("permissions") or [])
+        source_label = "zip" if key in installed_keys else "remote"
+        manifest["source_label"] = source_label
         manifest_data = manifest or None
 
         if key in existing:
@@ -330,6 +353,8 @@ async def feature_matrix(db: AsyncSession) -> dict[str, Any]:
     features = await list_features(db)
     remote_rows = (await db.execute(select(RemotePlugin))).scalars().all()
     remote_by_name = {row.name: row for row in remote_rows}
+    plugin_install_rows = (await db.execute(select(PluginInstall))).scalars().all()
+    plugin_install_by_key = {row.key: row for row in plugin_install_rows}
 
     # 2) 拿全部账号 + 全部 account_feature
     accounts = (
@@ -368,7 +393,11 @@ async def feature_matrix(db: AsyncSession) -> dict[str, Any]:
 
     return {
         "features": [
-            FeatureInfo.from_feature(f, remote_by_name.get(f.key)).model_dump()
+            FeatureInfo.from_feature(
+                f,
+                remote_by_name.get(f.key),
+                plugin_install_by_key.get(f.key),
+            ).model_dump()
             for f in features
         ],
         "accounts": rows,

@@ -32,10 +32,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db.models.feature import BUILTIN_FEATURES
 from ..db.models.plugin import (
     PLUGIN_SOURCE_ZIP,
+    PLUGIN_TRUST_COMMUNITY,
+    PLUGIN_TRUST_VERIFIED,
     PluginInstall,
 )
 from ..settings import settings
 from ..worker.plugins.manifest import Manifest
+from .remote_plugin_service import (
+    delete_installed_plugin_record,
+    lint_plugin_metadata_files,
+    set_installed_plugin_enabled,
+    upsert_installed_plugin,
+)
 
 log = logging.getLogger(__name__)
 
@@ -329,6 +337,7 @@ async def install_zip(
         final_enabled = was_enabled and (sig_ok is not False)
 
         manifest_json = parsed.manifest.to_dict()
+        lint_warnings = lint_plugin_metadata_files(final_dir)
         if existing is None:
             row = PluginInstall(
                 key=parsed.manifest.key,
@@ -348,6 +357,21 @@ async def install_zip(
             existing.installed_path = str(final_dir)
             existing.enabled = final_enabled
             row = existing
+        await upsert_installed_plugin(
+            db,
+            key=parsed.manifest.key,
+            source=source,
+            source_url=None,
+            installed_path=str(final_dir),
+            version=parsed.manifest.version,
+            manifest_json=manifest_json,
+            enabled=final_enabled,
+            signature_ok=sig_ok,
+            trust_tier=PLUGIN_TRUST_VERIFIED if sig_ok is True else PLUGIN_TRUST_COMMUNITY,
+            source_label="ZIP",
+            last_install_error=None,
+            lint_warnings=lint_warnings,
+        )
         await db.flush()
         return row
     except Exception:
@@ -364,6 +388,7 @@ async def uninstall(db: AsyncSession, key: str) -> bool:
         return False
     target = Path(row.installed_path)
     await db.delete(row)
+    await delete_installed_plugin_record(db, key)
     await db.flush()
     # 删目录失败不阻塞 DB 提交（但写日志方便排查）
     try:
@@ -386,6 +411,7 @@ async def set_enabled(db: AsyncSession, key: str, enabled: bool) -> PluginInstal
             "签名校验失败，禁止启用；管理员可先重新上传带正确签名的 zip",
         )
     row.enabled = bool(enabled)
+    await set_installed_plugin_enabled(db, key, row.enabled)
     await db.flush()
     return row
 

@@ -416,6 +416,9 @@ export interface FeatureInfo {
   display_name: string;
   is_builtin: boolean;
   source_type?: "local" | "remote" | string;
+  source_label?: string | null;
+  orphan?: boolean;
+  signature_ok?: boolean | null;
   version?: string | null;
   config_schema?: Record<string, unknown> | null;
   category?: FeatureCategory | string | null;

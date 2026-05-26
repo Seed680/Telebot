@@ -15,6 +15,9 @@ class FeatureInfo(BaseModel):
     display_name: str
     is_builtin: bool
     source_type: str = "local"
+    source_label: str | None = None
+    orphan: bool = False
+    signature_ok: bool | None = None
     version: str | None = None
     config_schema: dict[str, Any] | None = None
     category: str = "utility"
@@ -28,10 +31,25 @@ class FeatureInfo(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     @classmethod
-    def from_feature(cls, f: Feature, remote_plugin: Any | None = None) -> FeatureInfo:
+    def from_feature(
+        cls,
+        f: Feature,
+        remote_plugin: Any | None = None,
+        plugin_install: Any | None = None,
+    ) -> FeatureInfo:
         manifest = getattr(f, "manifest", None) or {}
         source_url = str(getattr(remote_plugin, "source_url", "") or "")
         source_type = "remote" if remote_plugin is not None and not source_url.startswith("local://") else "local"
+        source_label = manifest.get("source_label")
+        if not source_label:
+            if f.is_builtin:
+                source_label = "core"
+            elif plugin_install is not None:
+                source_label = str(getattr(plugin_install, "source", "") or "zip")
+            elif remote_plugin is not None:
+                source_label = "remote"
+            else:
+                source_label = "local-orphan" if manifest.get("x-orphan") else "local"
         config_schema = manifest.get("config_schema")
         schema_meta = config_schema if isinstance(config_schema, dict) else {}
         category = str(manifest.get("category") or schema_meta.get("x-category") or "utility")
@@ -46,6 +64,9 @@ class FeatureInfo(BaseModel):
             display_name=f.display_name,
             is_builtin=f.is_builtin,
             source_type=source_type,
+            source_label=str(source_label),
+            orphan=bool(manifest.get("x-orphan")),
+            signature_ok=getattr(plugin_install, "signature_ok", None),
             version=f.version,
             config_schema=config_schema,
             category=category,

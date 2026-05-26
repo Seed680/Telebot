@@ -1,0 +1,26 @@
+{
+  "name": "with_http",
+  "display_name": "HTTP 示例",
+  "description": "演示第三方模块通过 ctx.http 发起受控 HTTP 请求。",
+  "author": "examples",
+  "version": "0.1.0",
+  "entry": "plugin.py",
+  "min_telepilot_version": "0.24.0",
+  "commands": ["http_status"],
+  "category": "utility",
+  "permissions": ["external_http", "edit_message"],
+  "allowed_hosts": ["api.github.com"],
+  "config_schema": {
+    "type": "object",
+    "x-ui-mode": "single",
+    "additionalProperties": false,
+    "properties": {
+      "url": {
+        "type": "string",
+        "title": "请求地址",
+        "default": "https://api.github.com/zen",
+        "description": "必须匹配 manifest.allowed_hosts。"
+      }
+    }
+  }
+}

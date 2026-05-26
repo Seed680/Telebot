@@ -6,7 +6,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 
 from ..db.models.llm_usage import LLMUsage
 from ..deps import CurrentUser, DBSession
@@ -52,6 +52,27 @@ class LLMUsageRecentResponse(BaseModel):
     summary: LLMUsageSummary
 
 
+class PluginLLMUsageSummaryItem(BaseModel):
+    """按插件 source 聚合的 LLM 用量。"""
+
+    plugin_key: str
+    source: str
+    request_count: int
+    success_count: int
+    failed_count: int
+    total_tokens: int
+    input_tokens: int
+    output_tokens: int
+    avg_latency_ms: int
+    last_used_at: datetime | None = None
+
+
+class PluginLLMUsageSummaryResponse(BaseModel):
+    """插件 LLM 用量聚合列表。"""
+
+    items: list[PluginLLMUsageSummaryItem]
+
+
 @router.get("/recent", response_model=LLMUsageRecentResponse)
 async def list_recent_llm_usage(
     db: DBSession,
@@ -86,3 +107,61 @@ async def list_recent_llm_usage(
             avg_latency_ms=avg_latency_ms,
         ),
     )
+
+
+@router.get("/plugins/summary", response_model=PluginLLMUsageSummaryResponse)
+async def list_plugin_llm_usage_summary(
+    db: DBSession,
+    _user: CurrentUser,
+    plugin_key: str | None = Query(None, min_length=1, max_length=48),
+    limit: int = Query(50, ge=1, le=200),
+) -> PluginLLMUsageSummaryResponse:
+    """按 ``source=plugin:<key>`` 聚合插件 LLM 用量。"""
+
+    source_expr = LLMUsage.source
+    conditions = [LLMUsage.source.like("plugin:%")]
+    if plugin_key:
+        conditions.append(LLMUsage.source == f"plugin:{plugin_key.strip()}")
+
+    result = (
+        await db.execute(
+            select(
+                source_expr.label("source"),
+                func.count(LLMUsage.id).label("request_count"),
+                func.coalesce(
+                    func.sum(case((LLMUsage.success.is_(True), 1), else_=0)),
+                    0,
+                ).label("success_count"),
+                func.coalesce(func.sum(LLMUsage.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(LLMUsage.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.avg(LLMUsage.latency_ms), 0).label("avg_latency_ms"),
+                func.max(LLMUsage.created_at).label("last_used_at"),
+            )
+            .where(*conditions)
+            .group_by(source_expr)
+            .order_by(func.max(LLMUsage.created_at).desc())
+            .limit(limit)
+        )
+    )
+    items: list[PluginLLMUsageSummaryItem] = []
+    for row in result.all():
+        source = str(row.source or "")
+        request_count = int(row.request_count or 0)
+        success_count = int(row.success_count or 0)
+        input_tokens = int(row.input_tokens or 0)
+        output_tokens = int(row.output_tokens or 0)
+        items.append(
+            PluginLLMUsageSummaryItem(
+                plugin_key=source.removeprefix("plugin:"),
+                source=source,
+                request_count=request_count,
+                success_count=success_count,
+                failed_count=max(0, request_count - success_count),
+                total_tokens=input_tokens + output_tokens,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                avg_latency_ms=int(row.avg_latency_ms or 0),
+                last_used_at=row.last_used_at,
+            )
+        )
+    return PluginLLMUsageSummaryResponse(items=items)

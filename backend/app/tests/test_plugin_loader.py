@@ -27,6 +27,7 @@ from app.worker.plugins.loader import (
     _BUILTIN_MODULES,
     _clear_installed_module_cache,
     _import_builtins,
+    _load_dir,
     _manifest_compatible,
     _missing_plugin_error,
     load_plugins_for_account,
@@ -97,6 +98,19 @@ class _FakeFeature:
     manifest: dict | None = None
 
 
+@dataclass
+class _FakePluginInstall:
+    key: str
+    enabled: bool = True
+    signature_ok: bool | None = True
+
+
+@dataclass
+class _FakeRemotePlugin:
+    name: str
+    enabled: bool = True
+
+
 # ─────────────────────────────────────────────────────
 # Fake AsyncSession：拦截 db.get / db.execute / db.commit
 # ─────────────────────────────────────────────────────
@@ -110,12 +124,16 @@ class _FakeDB:
         afs: list[_FakeAF],
         rules: list[_FakeRule],
         features: dict[str, Any] | None = None,
+        plugin_installs: dict[str, Any] | None = None,
+        remote_plugins: dict[str, Any] | None = None,
     ) -> None:
         self.accounts = accounts
         self.humanize = humanize
         self.afs = afs
         self.rules = rules
         self.features = features or {}
+        self.plugin_installs = plugin_installs or {}
+        self.remote_plugins = remote_plugins or {}
         # 记录 update 调用，便于断言 state 改动
         self.update_calls: list[Any] = []
 
@@ -130,6 +148,8 @@ class _FakeDB:
             return self.humanize.get(pk)
         if name == "feature":
             return self.features.get(pk)
+        if name == "plugin_install":
+            return self.plugin_installs.get(pk)
         return None
 
     async def execute(self, stmt):
@@ -137,7 +157,29 @@ class _FakeDB:
         # update -> 记录并返回空 result
         if text.startswith("update"):
             self.update_calls.append(stmt)
+            values = {
+                getattr(col, "key", ""): getattr(bind, "value", None)
+                for col, bind in getattr(stmt, "_values", {}).items()
+            }
+            where_values = {
+                getattr(getattr(expr, "left", None), "key", ""): getattr(
+                    getattr(expr, "right", None),
+                    "value",
+                    None,
+                )
+                for expr in getattr(stmt, "_where_criteria", ())
+            }
+            if "account_feature" in text:
+                for af in self.afs:
+                    if where_values.get("account_id") not in {None, af.account_id}:
+                        continue
+                    if where_values.get("feature_key") not in {None, af.feature_key}:
+                        continue
+                    for key, value in values.items():
+                        setattr(af, key, value)
             return _FakeResult([])
+        if "remote_plugin" in text:
+            return _FakeResult([(row,) for row in self.remote_plugins.values()])
         # select account_feature where account_id = X
         if "account_feature" in text:
             return _FakeResult([(af,) for af in self.afs])
@@ -220,6 +262,84 @@ def test_clear_installed_module_cache_drops_registered_class() -> None:
         _REGISTRY.pop("_test_installed_reload", None)
 
 
+def test_installed_plugin_identity_mismatch_does_not_pollute_registry(tmp_path) -> None:
+    """已授权目录不能通过 MANIFEST.key/Plugin.key 冒充其它插件。"""
+    from app.worker.plugins.base import _REGISTRY
+
+    class _ExistingAutoReply(Plugin):
+        key = "auto_reply"
+        display_name = "existing"
+
+    _REGISTRY["auto_reply"] = _ExistingAutoReply
+
+    plugin_dir = tmp_path / "evil"
+    plugin_dir.mkdir()
+    (plugin_dir / "__init__.py").write_text(
+        "\n".join(
+            [
+                "from app.worker.plugins.base import Plugin, register",
+                "from app.worker.plugins.manifest import Manifest",
+                "",
+                "@register",
+                "class EvilPlugin(Plugin):",
+                "    key = 'auto_reply'",
+                "    display_name = 'evil'",
+                "",
+                "PLUGIN_CLASS = EvilPlugin",
+                "MANIFEST = Manifest(key='auto_reply', display_name='evil')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        loaded = _load_dir(plugin_dir, source="installed")
+        assert loaded == {}
+        assert _REGISTRY.get("auto_reply") is _ExistingAutoReply
+        assert "evil" not in _REGISTRY
+    finally:
+        _REGISTRY.pop("auto_reply", None)
+        _clear_installed_module_cache("evil")
+
+
+def test_installed_plugin_import_failure_rolls_back_registry(tmp_path) -> None:
+    """插件 import 中途失败时，已发生的 @register 副作用也要回滚。"""
+    from app.worker.plugins.base import _REGISTRY
+
+    class _ExistingAutoReply(Plugin):
+        key = "auto_reply"
+        display_name = "existing"
+
+    _REGISTRY["auto_reply"] = _ExistingAutoReply
+
+    plugin_dir = tmp_path / "boom"
+    plugin_dir.mkdir()
+    (plugin_dir / "__init__.py").write_text(
+        "\n".join(
+            [
+                "from app.worker.plugins.base import Plugin, register",
+                "",
+                "@register",
+                "class BoomPlugin(Plugin):",
+                "    key = 'auto_reply'",
+                "    display_name = 'boom'",
+                "",
+                "raise RuntimeError('boom after register')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        loaded = _load_dir(plugin_dir, source="installed")
+        assert loaded == {}
+        assert _REGISTRY.get("auto_reply") is _ExistingAutoReply
+        assert "boom" not in _REGISTRY
+    finally:
+        _REGISTRY.pop("auto_reply", None)
+        _clear_installed_module_cache("boom")
+
+
 def test_clear_installed_module_cache_removes_pycache(monkeypatch, tmp_path) -> None:
     """git pull 后旧 __pycache__ 也要清掉，避免重新 import 仍读旧字节码。"""
 
@@ -232,6 +352,269 @@ def test_clear_installed_module_cache_removes_pycache(monkeypatch, tmp_path) -> 
     _clear_installed_module_cache("_test_installed_reload")
 
     assert not cache_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_authorize_installed_plugin_rejects_orphan_directory() -> None:
+    """磁盘/Feature 中有 installed 插件但没有安装记录时，必须按孤儿插件拒绝。"""
+
+    db = _FakeDB(accounts={}, humanize={}, afs=[], rules=[])
+
+    auth = await loader_mod._authorize_installed_plugin(db, "orphan_demo")
+
+    assert auth.allowed is False
+    assert auth.state == "failed"
+    assert "orphan plugin" in (auth.last_error or "")
+
+
+@pytest.mark.asyncio
+async def test_authorize_installed_plugin_honors_plugin_install_enabled() -> None:
+    """zip 安装表的 enabled=false 必须成为运行期硬门禁。"""
+
+    db = _FakeDB(
+        accounts={},
+        humanize={},
+        afs=[],
+        rules=[],
+        plugin_installs={
+            "zip_demo": _FakePluginInstall(
+                key="zip_demo",
+                enabled=False,
+                signature_ok=True,
+            )
+        },
+    )
+
+    auth = await loader_mod._authorize_installed_plugin(db, "zip_demo")
+
+    assert auth.allowed is False
+    assert auth.state == "disabled"
+    assert "PluginInstall.enabled=False" in (auth.last_error or "")
+
+
+@pytest.mark.asyncio
+async def test_authorize_installed_plugin_rejects_failed_signature() -> None:
+    """签名失败的 zip 插件即使 enabled=true 也不能被 worker 加载。"""
+
+    db = _FakeDB(
+        accounts={},
+        humanize={},
+        afs=[],
+        rules=[],
+        plugin_installs={
+            "bad_sig": _FakePluginInstall(
+                key="bad_sig",
+                enabled=True,
+                signature_ok=False,
+            )
+        },
+    )
+
+    auth = await loader_mod._authorize_installed_plugin(db, "bad_sig")
+
+    assert auth.allowed is False
+    assert auth.state == "failed"
+    assert "PLUGIN_SIGNATURE_FAILED" in (auth.last_error or "")
+
+
+@pytest.mark.asyncio
+async def test_authorize_installed_plugin_allows_legacy_unsigned_when_enabled(monkeypatch) -> None:
+    """历史 signature_ok=NULL 插件在兼容开关开启时继续可加载，避免升级后突然失效。"""
+
+    monkeypatch.setattr(loader_mod.app_settings, "plugin_allow_legacy_unsigned_plugins", True)
+    db = _FakeDB(
+        accounts={},
+        humanize={},
+        afs=[],
+        rules=[],
+        plugin_installs={
+            "legacy_unsigned": _FakePluginInstall(
+                key="legacy_unsigned",
+                enabled=True,
+                signature_ok=None,
+            )
+        },
+    )
+
+    auth = await loader_mod._authorize_installed_plugin(db, "legacy_unsigned")
+
+    assert auth.allowed is True
+
+
+@pytest.mark.asyncio
+async def test_authorize_installed_plugin_rejects_legacy_unsigned_when_disabled(monkeypatch) -> None:
+    """管理员关闭兼容开关后，signature_ok=NULL 的历史插件必须被拒绝。"""
+
+    monkeypatch.setattr(loader_mod.app_settings, "plugin_allow_legacy_unsigned_plugins", False)
+    db = _FakeDB(
+        accounts={},
+        humanize={},
+        afs=[],
+        rules=[],
+        plugin_installs={
+            "legacy_unsigned": _FakePluginInstall(
+                key="legacy_unsigned",
+                enabled=True,
+                signature_ok=None,
+            )
+        },
+    )
+
+    auth = await loader_mod._authorize_installed_plugin(db, "legacy_unsigned")
+
+    assert auth.allowed is False
+    assert auth.state == "failed"
+    assert "PLUGIN_SIGNATURE_UNKNOWN" in (auth.last_error or "")
+
+
+@pytest.mark.asyncio
+async def test_authorize_installed_plugin_requires_remote_enabled() -> None:
+    """远程 Git 插件仍必须尊重 RemotePlugin.enabled 全局开关。"""
+
+    db = _FakeDB(
+        accounts={},
+        humanize={},
+        afs=[],
+        rules=[],
+        remote_plugins={
+            "remote_demo": _FakeRemotePlugin(name="remote_demo", enabled=False)
+        },
+    )
+
+    auth = await loader_mod._authorize_installed_plugin(db, "remote_demo")
+
+    assert auth.allowed is False
+    assert auth.state == "disabled"
+    assert "RemotePlugin.enabled=False" in (auth.last_error or "")
+
+
+@pytest.mark.asyncio
+async def test_activate_marks_orphan_installed_plugin_failed(monkeypatch, tmp_path) -> None:
+    """启动/reload 遇到孤儿 installed 目录时，要写回结构化 failed 状态。"""
+
+    plugin_key = "_test_orphan_installed"
+    plugin_dir = tmp_path / "installed" / plugin_key
+    plugin_dir.mkdir(parents=True)
+    monkeypatch.setattr(loader_mod, "_installed_dir", lambda: tmp_path / "installed")
+
+    af = _FakeAF(account_id=1, feature_key=plugin_key, enabled=True, config={})
+    db = _FakeDB(
+        accounts={1: _FakeAcc(id=1)},
+        humanize={1: None},
+        afs=[af],
+        rules=[],
+    )
+    state = loader_mod._AccountState(account_id=1)
+    state.client = MagicMock()
+    redis = _FakeRedis()
+
+    await loader_mod._activate(db, state, af, redis)
+
+    assert plugin_key not in state.instances
+    assert af.state == "failed"
+    assert af.last_error is not None
+    assert "PLUGIN_LOAD_ORPHAN" in af.last_error
+    assert any("没有 PluginInstall" in payload for _, payload in redis.list_pushes)
+
+
+@pytest.mark.asyncio
+async def test_reload_account_config_unloads_installed_plugin_when_authorization_denied(monkeypatch) -> None:
+    """已加载插件若全局开关被关闭，reload 时要立即卸载并写回 disabled。"""
+
+    from app.worker.plugins.base import _REGISTRY, register
+
+    shutdown_spy = AsyncMock()
+
+    @register
+    class _TempInstalledRuntimePlugin(Plugin):
+        key = "_test_runtime_remote_disabled"
+        display_name = "运行期禁用测试"
+
+        async def on_shutdown(self, ctx: PluginContext) -> None:  # noqa: D401
+            await shutdown_spy(ctx)
+
+    _TempInstalledRuntimePlugin._source = "installed"
+    plugin_key = _TempInstalledRuntimePlugin.key
+    af = _FakeAF(account_id=1, feature_key=plugin_key, enabled=True, config={})
+    db = _FakeDB(
+        accounts={1: _FakeAcc(id=1)},
+        humanize={1: None},
+        afs=[af],
+        rules=[],
+        remote_plugins={
+            plugin_key: _FakeRemotePlugin(name=plugin_key, enabled=False)
+        },
+    )
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(db))
+
+    state = loader_mod._AccountState(account_id=1)
+    state.redis = _FakeRedis()
+    inst = _TempInstalledRuntimePlugin()
+    ctx = PluginContext(account_id=1, feature_key=plugin_key, client=MagicMock())
+    state.instances[plugin_key] = inst
+    state.contexts[plugin_key] = ctx
+    loader_mod._STATES[1] = state
+
+    try:
+        await reload_account_config(account_id=1)
+    finally:
+        loader_mod._STATES.pop(1, None)
+        _REGISTRY.pop(plugin_key, None)
+
+    shutdown_spy.assert_awaited_once_with(ctx)
+    assert plugin_key not in state.instances
+    assert af.state == "disabled"
+    assert af.last_error == "PLUGIN_DISABLED: RemotePlugin.enabled=False"
+
+
+@pytest.mark.asyncio
+async def test_reload_account_config_force_reload_clears_installed_module_cache(monkeypatch) -> None:
+    """远程更新触发 reload_config(plugin_key) 时，要清掉 installed 模块缓存再重载。"""
+
+    from app.worker.plugins.base import _REGISTRY, register
+
+    shutdown_spy = AsyncMock()
+    cleared: list[str] = []
+
+    @register
+    class _TempInstalledForceReloadPlugin(Plugin):
+        key = "_test_force_reload_installed"
+        display_name = "强制重载测试"
+
+        async def on_shutdown(self, ctx: PluginContext) -> None:  # noqa: D401
+            await shutdown_spy(ctx)
+
+    _TempInstalledForceReloadPlugin._source = "installed"
+    plugin_key = _TempInstalledForceReloadPlugin.key
+    af = _FakeAF(account_id=1, feature_key=plugin_key, enabled=True, config={})
+    db = _FakeDB(
+        accounts={1: _FakeAcc(id=1)},
+        humanize={1: None},
+        afs=[af],
+        rules=[],
+        remote_plugins={plugin_key: _FakeRemotePlugin(name=plugin_key, enabled=True)},
+    )
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(db))
+    monkeypatch.setattr(loader_mod, "_clear_installed_module_cache", lambda key: cleared.append(key))
+
+    state = loader_mod._AccountState(account_id=1)
+    state.redis = _FakeRedis()
+    state.client = MagicMock()
+    inst = _TempInstalledForceReloadPlugin()
+    ctx = PluginContext(account_id=1, feature_key=plugin_key, client=MagicMock())
+    state.instances[plugin_key] = inst
+    state.contexts[plugin_key] = ctx
+    loader_mod._STATES[1] = state
+
+    try:
+        await reload_account_config(account_id=1, payload={"plugin_key": plugin_key})
+    finally:
+        loader_mod._STATES.pop(1, None)
+        _REGISTRY.pop(plugin_key, None)
+
+    shutdown_spy.assert_awaited_once_with(ctx)
+    assert cleared == [plugin_key]
+    assert plugin_key in state.instances
 
 
 def test_missing_plugin_error_uses_codex_image_builtin_hint() -> None:
@@ -451,6 +834,63 @@ async def test_load_calls_on_startup(monkeypatch) -> None:
     await load_plugins_for_account(client, account_id=1, paused=paused, redis=redis)
 
     on_startup_spy.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ai_facade_injected_only_with_ai_text_permission(monkeypatch) -> None:
+    """ctx.ai 只应给声明 ai_text 权限的插件，避免无权限插件直接调 LLM。"""
+    from app.worker.plugins.ai_facade import PluginAI
+    from app.worker.plugins.base import _REGISTRY, register
+
+    @register
+    class _TempAIPlugin(Plugin):
+        key = "_test_ai_allowed"
+        display_name = "AI 权限测试"
+
+    @register
+    class _TempNoAIPlugin(Plugin):
+        key = "_test_ai_denied"
+        display_name = "无 AI 权限测试"
+
+    _TempAIPlugin._manifest = Manifest(
+        key="_test_ai_allowed",
+        display_name="AI 权限测试",
+        permissions=["ai_text"],
+    )
+    _TempNoAIPlugin._manifest = Manifest(
+        key="_test_ai_denied",
+        display_name="无 AI 权限测试",
+        permissions=[],
+    )
+
+    fake_db = _FakeDB(
+        accounts={1: _FakeAcc(id=1)},
+        humanize={1: None},
+        afs=[
+            _FakeAF(account_id=1, feature_key="_test_ai_allowed", enabled=True, config={}),
+            _FakeAF(account_id=1, feature_key="_test_ai_denied", enabled=True, config={}),
+        ],
+        rules=[],
+    )
+    monkeypatch.setattr(
+        loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db)
+    )
+
+    client = MagicMock()
+    client.on = lambda f: (lambda fn: fn)
+    paused = asyncio.Event()
+    paused.set()
+
+    try:
+        await load_plugins_for_account(client, account_id=1, paused=paused, redis=_FakeRedis())
+        state = loader_mod._STATES[1]
+
+        assert isinstance(state.contexts["_test_ai_allowed"].ai, PluginAI)
+        assert state.contexts["_test_ai_denied"].ai is None
+    finally:
+        loader_mod._STATES.pop(1, None)
+        _REGISTRY.pop("_test_ai_allowed", None)
+        _REGISTRY.pop("_test_ai_denied", None)
 
 
 # ─────────────────────────────────────────────────────

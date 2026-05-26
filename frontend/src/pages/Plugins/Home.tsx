@@ -16,9 +16,14 @@ import {
   Sparkles,
 } from "lucide-react";
 
+import { listAccountFeatures } from "@/api/accounts";
 import { getFeatureMatrix } from "@/api/features";
+import { listPluginLLMUsageSummary } from "@/api/llmUsage";
+import { listInstalledPackages } from "@/api/plugins";
 import { getSystemSettings } from "@/api/system";
-import type { FeatureInfo } from "@/api/types";
+import type { AccountFeatureItem, FeatureInfo } from "@/api/types";
+import type { PluginInstallOut } from "@/api/plugins";
+import type { PluginLLMUsageSummaryItem } from "@/api/llmUsage";
 import { CommandBadge } from "@/components/CommandBadge";
 import { Spinner } from "@/components/ui/misc";
 import { Button } from "@/components/ui/button";
@@ -65,6 +70,69 @@ function moduleSourceLabel(feature: FeatureInfo) {
   return feature.source_type === "remote" ? "远程" : "本地";
 }
 
+function moduleTrustBadge(
+  feature: FeatureInfo,
+  install?: PluginInstallOut,
+): { label: string; tone: "neutral" | "success" | "warn" | "danger" | "outline"; title: string } {
+  const signatureOk = install?.signature_ok ?? feature.signature_ok;
+  if (signatureOk === false) {
+    return {
+      label: "签名失败",
+      tone: "danger",
+      title: "安装包签名校验失败，后端会拒绝直接加载或启用。",
+    };
+  }
+  if (feature.orphan || feature.source_label === "local-orphan") {
+    return {
+      label: "孤立目录",
+      tone: "danger",
+      title: "磁盘或 feature 表存在该模块，但后端没有找到可信安装记录。",
+    };
+  }
+  if (feature.is_builtin) {
+    return {
+      label: "内置核心",
+      tone: "success",
+      title: "随 TelePilot 一起发布的内置模块。",
+    };
+  }
+  if (signatureOk === true) {
+    return {
+      label: "签名通过",
+      tone: "success",
+      title: "已安装包通过后端签名校验。",
+    };
+  }
+  if (feature.source_label === "remote") {
+    return {
+      label: "远程 Git",
+      tone: "outline",
+      title: "来自远程 Git/社区仓库；当前未绑定 zip 签名状态。",
+    };
+  }
+  if (feature.source_type === "remote") {
+    return {
+      label: "远程 Git",
+      tone: "outline",
+      title: "来自远程 Git/社区仓库；当前 feature-matrix 未暴露签名状态。",
+    };
+  }
+  if (signatureOk === null) {
+    return {
+      label: "未验签",
+      tone: "warn",
+      title: "历史或本地安装包没有签名结果；后端兼容开关会决定是否允许加载。",
+    };
+  }
+  return {
+    label: install ? "本地安装" : "本地/孤立",
+    tone: "neutral",
+    title: install
+      ? "本地安装模块；当前未拿到可验证签名结果。"
+      : "feature-matrix 中存在该模块，但已安装包接口没有对应记录，来源需以后端补充字段确认。",
+  };
+}
+
 function moduleVersionLabel(version?: string | null) {
   const value = (version || "").trim();
   if (!value) return "v-";
@@ -78,6 +146,13 @@ function moduleUpdateMessage(feature: FeatureInfo) {
     return `当前 ${current}，远程 ${latest}；请到“安装模块”更新。`;
   }
   return "远程模块有新版，请到“安装模块”更新。";
+}
+
+function formatCompactNumber(value: number) {
+  if (!Number.isFinite(value)) return "0";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(value);
 }
 
 export function PluginsHome() {
@@ -97,6 +172,14 @@ export function PluginsHome() {
   const settingsQ = useQuery({
     queryKey: ["system", "settings"],
     queryFn: getSystemSettings,
+  });
+  const installedQ = useQuery({
+    queryKey: ["plugins", "installed-packages"],
+    queryFn: listInstalledPackages,
+  });
+  const pluginUsageQ = useQuery({
+    queryKey: ["llm", "plugin-usage-summary"],
+    queryFn: () => listPluginLLMUsageSummary({ limit: 200 }),
   });
 
   const accounts = matrixQ.data?.accounts ?? [];
@@ -121,9 +204,35 @@ export function PluginsHome() {
   }, [accounts, searchParams]);
 
   const selectedAccount = accounts.find((a) => a.id === selectedAid) ?? null;
+  const accountFeaturesQ = useQuery({
+    queryKey: ["account", selectedAid, "features"],
+    queryFn: () => listAccountFeatures(selectedAid!),
+    enabled: selectedAid !== null,
+  });
   const codexImageFeature = features.find((f) => f.key === "codex_image");
   const codexImageState = selectedAccount?.features?.codex_image ?? "disabled";
   const cmdPrefix = settingsQ.data?.command_prefix || ",";
+  const accountFeatureByKey = useMemo(() => {
+    const map = new Map<string, AccountFeatureItem>();
+    for (const item of accountFeaturesQ.data ?? []) {
+      map.set(item.feature_key, item);
+    }
+    return map;
+  }, [accountFeaturesQ.data]);
+  const installByKey = useMemo(() => {
+    const map = new Map<string, PluginInstallOut>();
+    for (const item of installedQ.data ?? []) {
+      map.set(item.key, item);
+    }
+    return map;
+  }, [installedQ.data]);
+  const pluginUsageByKey = useMemo(() => {
+    const map = new Map<string, PluginLLMUsageSummaryItem>();
+    for (const item of pluginUsageQ.data?.items ?? []) {
+      map.set(item.plugin_key, item);
+    }
+    return map;
+  }, [pluginUsageQ.data]);
 
   const grouped = useMemo(() => {
     const zones: Record<ModuleCategory, typeof features> = {
@@ -346,6 +455,21 @@ export function PluginsHome() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          {accountFeaturesQ.isError ? (
+            <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              当前账号模块状态加载失败，暂时无法显示最近错误详情。
+            </div>
+          ) : null}
+          {pluginUsageQ.isLoading ? (
+            <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+              AI 用量加载中
+            </div>
+          ) : null}
+          {pluginUsageQ.isError ? (
+            <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              AI 用量暂不可用
+            </div>
+          ) : null}
           {accounts.length > 0 ? (
             <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
               <span className="text-sm text-muted-foreground">选择配置的账号：</span>
@@ -371,6 +495,9 @@ export function PluginsHome() {
                 selectedAccountId={selectedAccount?.id}
                 selectedFeatures={selectedAccount?.features ?? {}}
                 selectedFeatureEnabled={selectedAccount?.feature_enabled ?? {}}
+                accountFeatureByKey={accountFeatureByKey}
+                installByKey={installByKey}
+                pluginUsageByKey={pluginUsageByKey}
               />
             ))}
           </div>
@@ -524,6 +651,9 @@ function FeatureZone({
   selectedAccountId,
   selectedFeatures,
   selectedFeatureEnabled,
+  accountFeatureByKey,
+  installByKey,
+  pluginUsageByKey,
 }: {
   title: string;
   hint: string;
@@ -532,6 +662,9 @@ function FeatureZone({
   selectedAccountId?: number;
   selectedFeatures: Record<string, string>;
   selectedFeatureEnabled: Record<string, boolean>;
+  accountFeatureByKey: Map<string, AccountFeatureItem>;
+  installByKey: Map<string, PluginInstallOut>;
+  pluginUsageByKey: Map<string, PluginLLMUsageSummaryItem>;
 }) {
   const nav = useNavigate();
 
@@ -554,24 +687,53 @@ function FeatureZone({
               const status = selectedFeatures[f.key] ?? "disabled";
               const enabled = selectedFeatureEnabled[f.key] ?? status !== "disabled";
               const runtimeLabel = moduleRuntimeLabel(status, enabled);
+              const accountFeature = accountFeatureByKey.get(f.key);
+              const pluginUsage = pluginUsageByKey.get(f.key);
+              const lastError = accountFeature?.last_error?.trim();
+              const trustBadge = moduleTrustBadge(f, installByKey.get(f.key));
               const path = featureConfigPath(selectedAccountId, f.key, f, {
                 source: "plugins",
               });
               const canConfigure = Boolean(path);
               return (
-                <div key={f.key} className="flex flex-col gap-3 rounded-md border p-2 sm:flex-row sm:items-center sm:justify-between">
+                <div
+                  key={f.key}
+                  className={`flex flex-col gap-3 rounded-md border p-2 sm:flex-row sm:items-center sm:justify-between ${
+                    status === "failed" ? "border-destructive/40 bg-destructive/5" : ""
+                  }`}
+                >
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium" title={f.display_name}>
                       {f.display_name}
                     </div>
                     <div className="font-mono text-xs text-muted-foreground">{f.key}</div>
+                    {pluginUsage ? (
+                      <div className="mt-1 flex flex-wrap gap-1 text-[11px] text-muted-foreground">
+                        <span className="rounded-full border bg-muted/40 px-2 py-0.5">
+                          AI {formatCompactNumber(pluginUsage.total_tokens)} tokens
+                        </span>
+                        <span className="rounded-full border bg-muted/40 px-2 py-0.5">
+                          {pluginUsage.request_count} 次调用
+                        </span>
+                        {pluginUsage.failed_count > 0 ? (
+                          <span className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-amber-800">
+                            失败 {pluginUsage.failed_count}
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : null}
                     {f.last_update_check_error ? (
                       <div className="mt-1 text-xs text-destructive">
                         更新检查失败：{f.last_update_check_error}
                       </div>
                     ) : null}
+                    {status === "failed" ? (
+                      <div className="mt-1 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs leading-5 text-destructive">
+                        加载异常{lastError ? `：${lastError}` : "：后端未返回错误详情"}
+                      </div>
+                    ) : null}
                   </div>
-                  <div className="grid max-w-full shrink-0 grid-cols-[154px_118px_50px_auto] items-center gap-2 overflow-x-auto">
+                  <div className="grid max-w-full shrink-0 grid-cols-[154px_142px_50px_auto] items-center gap-2 overflow-x-auto">
                     <div className="grid w-[154px] grid-cols-[46px_48px_44px] items-center gap-2">
                       <FeatureCapabilityBadge
                         show={Boolean(f.update_available)}
@@ -588,12 +750,13 @@ function FeatureZone({
                         实验性
                       </FeatureCapabilityBadge>
                     </div>
-                    <div className="grid w-[118px] grid-cols-[38px_72px] items-center gap-2">
+                    <div className="grid w-[142px] grid-cols-[62px_72px] items-center gap-2">
                       <MetaBadge
-                        tone={f.source_type === "remote" ? "outline" : "neutral"}
+                        tone={trustBadge.tone}
                         className="h-7 justify-center px-0 text-[10px]"
+                        title={`${trustBadge.title} 来源：${moduleSourceLabel(f)}`}
                       >
-                        {moduleSourceLabel(f)}
+                        {trustBadge.label}
                       </MetaBadge>
                       <MetaBadge
                         mono
@@ -605,9 +768,9 @@ function FeatureZone({
                       </MetaBadge>
                     </div>
                     <MetaBadge
-                      tone={!enabled ? "neutral" : status === "failed" ? "warn" : "success"}
+                      tone={!enabled ? "neutral" : status === "failed" ? "danger" : "success"}
                       className="h-7 w-[50px] justify-center px-0 text-[10px]"
-                      title={`开关：${enabled ? "已启用" : "未启用"}；运行状态：${runtimeLabel}`}
+                      title={`开关：${enabled ? "已启用" : "未启用"}；运行状态：${runtimeLabel}${lastError ? `；最近错误：${lastError}` : ""}`}
                     >
                       {enabled ? "已启用" : "未启用"}
                     </MetaBadge>

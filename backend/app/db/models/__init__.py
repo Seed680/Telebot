@@ -8,7 +8,7 @@ from .ignored_peer import IgnoredPeer
 from .llm_usage import LLMUsage
 from .log import AuditLog, RuntimeLog
 from .notify import NotifyBot
-from .plugin import PluginInstall
+from .plugin import InstalledPlugin, PluginInstall
 from .plugin_repo import PluginRepo
 from .rate_limit import RateLimitEvent, RateLimitOverride, RateLimitRule, RateLimitTemplate
 from .remote_plugin import RemotePlugin
@@ -27,6 +27,7 @@ __all__ = [
     "Feature",
     "HumanizeConfig",
     "IgnoredPeer",
+    "InstalledPlugin",
     "LLMProvider",
     "LLMUsage",
     "NotificationChannel",

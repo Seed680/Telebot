@@ -55,6 +55,18 @@ ALLOWED_API: dict[str, frozenset[str]] = {
     "moderate_chat": frozenset({"ban_user", "kick_user", "mute_user", "unban_user"}),
 }
 
+# 非 TelegramClient 能力由其它 facade 处理，不应让 SandboxClient 误报未知权限。
+_NON_CLIENT_PERMISSIONS: frozenset[str] = frozenset(
+    {
+        "external_http",
+        "external_http_bypass_proxy",
+        "ai_text",
+        "ai_vision",
+        "ai_image",
+        "ai_stt",
+    }
+)
+
 
 # 默认放行集合：连接 / 关闭 / 自身查询等，不属于业务 API，避免插件起步崩
 # 注意：阶段 E 移除了 "session"，防止第三方插件访问真实 session 对象
@@ -105,6 +117,41 @@ _BLOCKED_ATTRS: frozenset[str] = frozenset(
     }
 )
 
+_EVENT_BLOCKED_ATTRS: frozenset[str] = frozenset(
+    {
+        "__class__",
+        "__dict__",
+        "__getattribute__",
+        "__getattr__",
+        "__setattr__",
+        "__globals__",
+        "__code__",
+        "__closure__",
+        "__func__",
+        "__module__",
+        "__builtins__",
+        "__subclasshook__",
+        "__mro__",
+        "_client",
+        "_entities",
+        "_event",
+        "_sender",
+        "_chat",
+        "original_update",
+    }
+)
+
+_EVENT_METHOD_TO_CLIENT_METHOD: dict[str, str] = {
+    "respond": "respond",
+    "reply": "reply",
+    "edit": "edit",
+    "delete": "delete_messages",
+    "get_reply_message": "get_messages",
+    "get_chat": "get_chat",
+    "get_sender": "get_chat",
+}
+_EVENT_READ_HELPERS: frozenset[str] = frozenset({"get_reply_message", "get_chat", "get_sender"})
+
 
 def resolve_permissions(perms: list[str] | None) -> frozenset[str]:
     """把权限名列表展开成允许的方法名集合（去重）。
@@ -115,6 +162,8 @@ def resolve_permissions(perms: list[str] | None) -> frozenset[str]:
     for p in perms or []:
         methods = ALLOWED_API.get(p)
         if methods is None:
+            if p in _NON_CLIENT_PERMISSIONS:
+                continue
             log.warning("manifest 引用未知权限名 %r", p)
             continue
         out |= methods
@@ -151,6 +200,17 @@ def _require_allowed_method(client: SandboxClient, method_name: str) -> Any:
     return object.__getattribute__(client, "_real")
 
 
+def _require_event_method(client: SandboxClient, plugin_key: str, event_method: str) -> None:
+    required = _EVENT_METHOD_TO_CLIENT_METHOD[event_method]
+    allowed = object.__getattribute__(client, "_allowed")
+    if required not in allowed:
+        perms = object.__getattribute__(client, "_perms")
+        raise PermissionError(
+            f"插件 {plugin_key!r} 缺少权限调用 event.{event_method}; "
+            f"请在 manifest.permissions 中声明对应能力（持有: {perms}）"
+        )
+
+
 class SandboxClient:
     """``TelegramClient`` 的最小化代理：只放行 manifest 声明的方法。
 
@@ -161,6 +221,7 @@ class SandboxClient:
     - 每次 ``__getattr__`` 调用都会经过权限检查
     """
 
+    is_sandbox_client = True
     __slots__ = ("_real", "_allowed", "_plugin_key", "_perms")
 
     def __init__(
@@ -298,4 +359,87 @@ class SandboxClient:
         return f"<SandboxClient plugin={plugin_key} perms={perms}>"
 
 
-__all__ = ["ALLOWED_API", "SandboxClient", "resolve_permissions"]
+class SandboxEvent:
+    """Telethon event proxy that routes helper methods through manifest permissions."""
+
+    __slots__ = ("_real", "_client", "_plugin_key")
+
+    def __init__(self, real: Any, client: SandboxClient, *, plugin_key: str = "?") -> None:
+        self._real = real
+        self._client = client
+        self._plugin_key = plugin_key
+
+    @property
+    def __class__(self):  # type: ignore[override]
+        raise PermissionError(
+            f"插件 {self._plugin_key!r} 禁止访问 event.__class__"
+        )
+
+    @property
+    def __dict__(self) -> dict:  # type: ignore[override]
+        raise PermissionError(
+            f"插件 {self._plugin_key!r} 禁止访问 event.__dict__"
+        )
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        plugin_key = object.__getattribute__(self, "_plugin_key")
+        raise PermissionError(f"插件 {plugin_key!r} 禁止调用 event.__call__")
+
+    def __getattribute__(self, name: str) -> Any:
+        if name in _EVENT_BLOCKED_ATTRS or name.startswith("_"):
+            plugin_key = object.__getattribute__(self, "_plugin_key")
+            raise PermissionError(f"插件 {plugin_key!r} 禁止访问 event.{name}")
+        return super().__getattribute__(name)
+
+    def __getattr__(self, name: str) -> Any:
+        plugin_key = object.__getattribute__(self, "_plugin_key")
+        if name in _EVENT_BLOCKED_ATTRS or name.startswith("_"):
+            raise PermissionError(f"插件 {plugin_key!r} 禁止访问 event.{name}")
+
+        client = object.__getattribute__(self, "_client")
+        if name == "client":
+            return client
+
+        real = object.__getattribute__(self, "_real")
+        if name == "message":
+            return _wrap_event_child(getattr(real, "message", None), client, plugin_key)
+
+        if name in _EVENT_METHOD_TO_CLIENT_METHOD:
+            _require_event_method(client, plugin_key, name)
+            method = getattr(real, name)
+            if not callable(method):
+                return method
+
+            def _call(*args: Any, **kwargs: Any) -> Any:
+                result = method(*args, **kwargs)
+                if name not in _EVENT_READ_HELPERS:
+                    return result
+
+                async def _await_and_wrap() -> Any:
+                    value = await _maybe_await(result)
+                    return _wrap_event_child(value, client, plugin_key)
+
+                return _await_and_wrap()
+
+            return _call
+
+        value = getattr(real, name)
+        if callable(value):
+            raise PermissionError(
+                f"插件 {plugin_key!r} 禁止直接调用 event.{name}; "
+                "请改用 ctx.client 或声明后使用受控 event helper"
+            )
+        return value
+
+    def __repr__(self) -> str:  # pragma: no cover - 调试用
+        plugin_key = object.__getattribute__(self, "_plugin_key")
+        return f"<SandboxEvent plugin={plugin_key}>"
+
+
+def _wrap_event_child(value: Any, client: SandboxClient, plugin_key: str) -> Any:
+    if value is None:
+        return None
+    return SandboxEvent(value, client, plugin_key=plugin_key)
+
+
+__all__ = ["ALLOWED_API", "SandboxClient", "SandboxEvent", "resolve_permissions"]

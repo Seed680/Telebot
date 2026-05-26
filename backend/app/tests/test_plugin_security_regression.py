@@ -16,7 +16,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.db.models.feature import FEATURE_STATE_DISABLED, AccountFeature
+from app.db.models.feature import FEATURE_STATE_DISABLED, AccountFeature, Feature
+from app.db.models.plugin import InstalledPlugin
+from app.db.models.plugin_repo import PluginRepo
+from app.db.models.remote_plugin import RemotePlugin
+from app.services import plugin_repo_service as repo_svc
 from app.services import remote_plugin_service as svc
 
 
@@ -424,6 +428,97 @@ class TestSandboxClientSecurity:
             sandbox("fake_mtproto_call")
         assert "MTProto" in str(ex.value) or "__call__" in str(ex.value)
 
+    @pytest.mark.asyncio
+    async def test_sandbox_event_helpers_require_permissions(self):
+        """installed 插件不能通过 event helper 绕过 SandboxClient 权限。"""
+        from app.worker.plugins.sandbox import SandboxClient, SandboxEvent
+
+        calls: list[str] = []
+
+        class RawEvent:
+            raw_text = "hello"
+            chat_id = 123
+
+            def __init__(self) -> None:
+                self.message = SimpleNamespace(reply=self.reply, text="hello")
+
+            async def reply(self, *_args, **_kwargs):
+                calls.append("reply")
+
+            async def edit(self, *_args, **_kwargs):
+                calls.append("edit")
+
+            async def delete(self):
+                calls.append("delete")
+
+            async def get_reply_message(self):
+                calls.append("get_reply_message")
+                return SimpleNamespace(raw_text="reply")
+
+        raw_event = RawEvent()
+        denied = SandboxEvent(raw_event, SandboxClient(SimpleNamespace(), [], plugin_key="demo"), plugin_key="demo")
+
+        assert denied.raw_text == "hello"
+        assert denied.chat_id == 123
+        with pytest.raises(PermissionError):
+            await denied.reply("x")
+        with pytest.raises(PermissionError):
+            await denied.edit("x")
+        with pytest.raises(PermissionError):
+            await denied.delete()
+        with pytest.raises(PermissionError):
+            await denied.get_reply_message()
+        with pytest.raises(PermissionError):
+            await denied.message.reply("x")
+        assert calls == []
+
+        allowed = SandboxEvent(
+            raw_event,
+            SandboxClient(
+                SimpleNamespace(),
+                ["send_message", "edit_message", "delete_message", "read_chat"],
+                plugin_key="demo",
+            ),
+            plugin_key="demo",
+        )
+        await allowed.reply("x")
+        await allowed.edit("x")
+        await allowed.delete()
+        replied = await allowed.get_reply_message()
+        await allowed.message.reply("x")
+
+        assert calls == ["reply", "edit", "delete", "get_reply_message", "reply"]
+        with pytest.raises(PermissionError):
+            _ = replied.__dict__
+
+    def test_sandbox_event_exposes_sandbox_client_not_raw_client(self):
+        """event.client 必须返回 SandboxClient，不能暴露原始 Telethon client。"""
+        from app.worker.plugins.sandbox import SandboxClient, SandboxEvent
+
+        raw_client = SimpleNamespace(session="REAL_SESSION_OBJECT")
+        raw_event = SimpleNamespace(client=raw_client, raw_text="hello")
+        sandbox_client = SandboxClient(raw_client, [], plugin_key="demo")
+        event = SandboxEvent(raw_event, sandbox_client, plugin_key="demo")
+
+        assert event.client is sandbox_client
+        assert event.raw_text == "hello"
+        with pytest.raises(PermissionError):
+            _ = event._client
+
+    def test_sandbox_event_blocks_unlisted_callable_helpers(self):
+        """未列入白名单的 event callable 不能直接调用。"""
+        from app.worker.plugins.sandbox import SandboxClient, SandboxEvent
+
+        raw_event = SimpleNamespace(download_media=lambda: b"secret")
+        event = SandboxEvent(
+            raw_event,
+            SandboxClient(SimpleNamespace(), ["read_chat"], plugin_key="demo"),
+            plugin_key="demo",
+        )
+
+        with pytest.raises(PermissionError):
+            _ = event.download_media
+
 
 class TestPluginCommandLifecycle:
     """插件命令生命周期安全测试。"""
@@ -521,8 +616,16 @@ class _FakeRemotePluginDB:
         self.remote = SimpleNamespace(name="idiom_chain", enabled=False)
         self.accounts = [1, 2]
         self.account_features = list(account_features or [])
+        self.installed_rows: dict[str, InstalledPlugin] = {
+            "idiom_chain": InstalledPlugin(key="idiom_chain", source="git", enabled=False)
+        }
         self.added = []
         self.flush_count = 0
+
+    async def get(self, model, pk):  # noqa: ANN001
+        if model is InstalledPlugin:
+            return self.installed_rows.get(pk)
+        return None
 
     async def execute(self, stmt):
         text = str(stmt).lower()
@@ -541,6 +644,119 @@ class _FakeRemotePluginDB:
 
     async def flush(self):
         self.flush_count += 1
+
+
+class _FakeRemoteInstallDB:
+    def __init__(self) -> None:
+        self.remote_rows: dict[str, RemotePlugin] = {}
+        self.installed_rows: dict[str, InstalledPlugin] = {}
+        self.features: dict[str, Feature] = {}
+        self.account_features: list[AccountFeature] = []
+        self.flush_count = 0
+
+    async def get(self, model, pk):  # noqa: ANN001
+        if model is InstalledPlugin:
+            return self.installed_rows.get(pk)
+        return None
+
+    async def execute(self, stmt):  # noqa: ANN001
+        text = str(stmt).lower()
+        if "remote_plugin" in text:
+            return _FakeResult(list(self.remote_rows.values()))
+        if "feature" in text and "account_feature" not in text:
+            return _FakeResult(list(self.features.values()))
+        if "account_feature" in text or "from account" in text:
+            return _FakeResult(self.account_features)
+        return _FakeResult([])
+
+    def add(self, row):  # noqa: ANN001
+        if isinstance(row, RemotePlugin):
+            self.remote_rows[row.name] = row
+        elif isinstance(row, InstalledPlugin):
+            self.installed_rows[row.key] = row
+        elif isinstance(row, Feature):
+            self.features[row.key] = row
+
+    async def delete(self, row):  # noqa: ANN001
+        if isinstance(row, RemotePlugin):
+            self.remote_rows.pop(row.name, None)
+        elif isinstance(row, InstalledPlugin):
+            self.installed_rows.pop(row.key, None)
+        elif isinstance(row, Feature):
+            self.features.pop(row.key, None)
+        elif isinstance(row, AccountFeature):
+            if row in self.account_features:
+                self.account_features.remove(row)
+
+    async def flush(self):
+        self.flush_count += 1
+
+
+class _FakePluginRepoDB:
+    def __init__(self, repo: PluginRepo | None = None) -> None:
+        self.repo = repo
+        self.remote_rows: dict[str, RemotePlugin] = {}
+        self.installed_rows: dict[str, InstalledPlugin] = {}
+        self.features: dict[str, Feature] = {}
+        self.flush_count = 0
+
+    async def get(self, model, pk):  # noqa: ANN001
+        if model is InstalledPlugin:
+            return self.installed_rows.get(pk)
+        return None
+
+    async def execute(self, stmt):  # noqa: ANN001
+        text = str(stmt).lower()
+        if "plugin_repo" in text:
+            return _FakeResult([self.repo] if self.repo is not None else [])
+        if "remote_plugin" in text:
+            return _FakeResult(list(self.remote_rows.values()))
+        if "feature" in text and "account_feature" not in text:
+            return _FakeResult(list(self.features.values()))
+        if "account_feature" in text or "from account" in text:
+            return _FakeResult([])
+        return _FakeResult([])
+
+    def add(self, row):  # noqa: ANN001
+        if isinstance(row, RemotePlugin):
+            self.remote_rows[row.name] = row
+        elif isinstance(row, InstalledPlugin):
+            self.installed_rows[row.key] = row
+        elif isinstance(row, Feature):
+            self.features[row.key] = row
+
+    async def flush(self):
+        self.flush_count += 1
+
+
+def _write_runtime_plugin(plugin_dir, *, key: str, version: str = "1.0.0", extra_py: str = "") -> None:
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "plugin.json").write_text(
+        (
+            "{"
+            f'"name":"{key}",'
+            f'"display_name":"{key}",'
+            f'"version":"{version}"'
+            "}"
+        ),
+        encoding="utf-8",
+    )
+    (plugin_dir / "manifest.py").write_text(
+        "from app.worker.plugins.manifest import Manifest\n"
+        f"MANIFEST = Manifest(key={key!r}, display_name={key!r}, version={version!r})\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        "from .plugin import DemoPlugin\nPLUGIN_CLASS = DemoPlugin\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "plugin.py").write_text(
+        "from app.worker.plugins.base import Plugin\n"
+        "class DemoPlugin(Plugin):\n"
+        f"    key = {key!r}\n"
+        f"{extra_py}",
+        encoding="utf-8",
+    )
 
 
 class TestRemotePluginEnableFlow:
@@ -588,7 +804,203 @@ class TestRemotePluginEnableFlow:
         await svc.enable(db, "idiom_chain")
 
         assert db.remote.enabled is True
+        assert db.installed_rows["idiom_chain"].enabled is True
         assert db.added == []
+
+    @pytest.mark.asyncio
+    async def test_disable_syncs_installed_plugin_row(self):
+        """远程插件禁用时同步统一安装表 enabled，避免未来读新表状态陈旧。"""
+        db = _FakeRemotePluginDB()
+        db.remote.enabled = True
+        db.installed_rows["idiom_chain"].enabled = True
+
+        await svc.disable(db, "idiom_chain")
+
+        assert db.remote.enabled is False
+        assert db.installed_rows["idiom_chain"].enabled is False
+
+    @pytest.mark.asyncio
+    async def test_install_dual_writes_installed_plugin_with_lint_warnings(self, monkeypatch, tmp_path):
+        """Git 安装成功后同步写 installed_plugin，并保存静态 lint warning。"""
+        monkeypatch.setattr(svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+
+        async def _fake_clone(*args, **_kwargs):  # noqa: ANN001
+            target = args[-1]
+            plugin_dir = tmp_path / "installed" / "git_demo"
+            assert str(plugin_dir) == str(target)
+            plugin_dir.mkdir(parents=True)
+            (plugin_dir / "plugin.json").write_text(
+                '{"name":"git_demo","display_name":"Git Demo","version":"1.2.3"}',
+                encoding="utf-8",
+            )
+            (plugin_dir / "manifest.py").write_text(
+                "from app.worker.plugins.manifest import Manifest\n"
+                "MANIFEST = Manifest(key='git_demo', display_name='Git Demo', version='1.2.3')\n",
+                encoding="utf-8",
+            )
+            (plugin_dir / "__init__.py").write_text("PLUGIN_CLASS = None\n", encoding="utf-8")
+            (plugin_dir / "plugin.py").write_text(
+                "import httpx\n"
+                "from app.db.models.plugin import PluginInstall\n"
+                "httpx.get('https://example.com')\n",
+                encoding="utf-8",
+            )
+            return ""
+
+        monkeypatch.setattr(svc, "_run_git", _fake_clone)
+        db = _FakeRemoteInstallDB()
+
+        row = await svc.install(db, "https://example.com/git_demo.git", enable=True)
+
+        installed = db.installed_rows["git_demo"]
+        assert row.name == "git_demo"
+        assert installed.source == "git"
+        assert installed.version == "1.2.3"
+        assert installed.source_url == "https://example.com/git_demo.git"
+        assert installed.installed_path == str(tmp_path / "installed" / "git_demo")
+        assert installed.enabled is True
+        assert installed.signature_ok is None
+        assert installed.trust_tier == "community"
+        assert installed.source_label == "Git"
+        assert installed.last_install_error is None
+        assert any("app.db.models.plugin" in item for item in installed.lint_warnings)
+        assert any("httpx.get" in item and "timeout" in item for item in installed.lint_warnings)
+
+    @pytest.mark.asyncio
+    async def test_update_dual_writes_installed_plugin(self, monkeypatch, tmp_path):
+        """Git 更新成功后也同步刷新 installed_plugin。"""
+        monkeypatch.setattr(svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        plugin_dir = tmp_path / "installed" / "update_demo"
+        (plugin_dir / ".git").mkdir(parents=True)
+        (plugin_dir / "plugin.json").write_text(
+            '{"name":"update_demo","display_name":"Update Demo","version":"1.0.0"}',
+            encoding="utf-8",
+        )
+        (plugin_dir / "manifest.py").write_text(
+            "from app.worker.plugins.manifest import Manifest\n"
+            "MANIFEST = Manifest(key='update_demo', display_name='Update Demo', version='1.0.0')\n",
+            encoding="utf-8",
+        )
+        (plugin_dir / "__init__.py").write_text("PLUGIN_CLASS = None\n", encoding="utf-8")
+        (plugin_dir / "plugin.py").write_text("import requests\n", encoding="utf-8")
+
+        async def _fake_pull(*_args, **_kwargs):  # noqa: ANN001
+            (plugin_dir / "plugin.json").write_text(
+                '{"name":"update_demo","display_name":"Update Demo","version":"1.1.0"}',
+                encoding="utf-8",
+            )
+            (plugin_dir / "plugin.py").write_text(
+                "import requests\nrequests.post('https://example.com')\n",
+                encoding="utf-8",
+            )
+            return ""
+
+        monkeypatch.setattr(svc, "_run_git", _fake_pull)
+        db = _FakeRemoteInstallDB()
+        db.remote_rows["update_demo"] = RemotePlugin(
+            name="update_demo",
+            display_name="Update Demo",
+            description="",
+            author="",
+            source_url="https://example.com/update_demo.git",
+            version="1.0.0",
+            enabled=False,
+        )
+
+        row = await svc.update(db, "update_demo")
+
+        installed = db.installed_rows["update_demo"]
+        assert row.version == "1.1.0"
+        assert installed.source == "git"
+        assert installed.version == "1.1.0"
+        assert installed.enabled is False
+        assert installed.source_url == "https://example.com/update_demo.git"
+        assert any("requests.post" in item and "timeout" in item for item in installed.lint_warnings)
+
+    @pytest.mark.asyncio
+    async def test_uninstall_removes_installed_plugin_row(self, tmp_path, monkeypatch):
+        """远程插件卸载时同步删除统一安装表，避免留下孤儿记录。"""
+        monkeypatch.setattr(svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        plugin_dir = tmp_path / "installed" / "remove_demo"
+        plugin_dir.mkdir(parents=True)
+        db = _FakeRemoteInstallDB()
+        db.remote_rows["remove_demo"] = RemotePlugin(
+            name="remove_demo",
+            display_name="Remove Demo",
+            description="",
+            author="",
+            source_url="https://example.com/remove_demo.git",
+            version="1.0.0",
+            enabled=True,
+        )
+        db.installed_rows["remove_demo"] = InstalledPlugin(
+            key="remove_demo",
+            source="git",
+            enabled=True,
+        )
+        db.features["remove_demo"] = Feature(key="remove_demo", display_name="Remove Demo", is_builtin=False)
+        db.account_features.append(AccountFeature(account_id=1, feature_key="remove_demo", enabled=True))
+
+        deleted = await svc.uninstall(db, "remove_demo")
+
+        assert deleted is True
+        assert "remove_demo" not in db.remote_rows
+        assert "remove_demo" not in db.installed_rows
+        assert "remove_demo" not in db.features
+        assert db.account_features == []
+        assert not plugin_dir.exists()
+
+
+class TestPluginRepoInstallFlow:
+    """仓库/本地导入路径也要同步统一安装表。"""
+
+    @pytest.mark.asyncio
+    async def test_install_plugin_from_repo_dual_writes_installed_plugin(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        repo_dir = tmp_path / "repo"
+        _write_runtime_plugin(
+            repo_dir / "repo_demo",
+            key="repo_demo",
+            version="2.0.0",
+            extra_py="import httpx\nhttpx.get('https://example.com')\n",
+        )
+
+        async def _cached(_url: str):
+            return repo_dir
+
+        monkeypatch.setattr(repo_svc, "_ensure_repo_cached", _cached)
+        db = _FakePluginRepoDB(PluginRepo(id=1, url="https://example.com/repo.git", name="Repo"))
+
+        row = await repo_svc.install_plugin_from_repo(db, 1, "repo_demo", default_enabled=True)
+
+        installed = db.installed_rows["repo_demo"]
+        assert row.name == "repo_demo"
+        assert installed.source == "repo"
+        assert installed.source_url == "https://example.com/repo.git"
+        assert installed.version == "2.0.0"
+        assert installed.enabled is True
+        assert installed.trust_tier == "community"
+        assert installed.source_label == "Plugin Repo"
+        assert any("httpx.get" in item and "timeout" in item for item in installed.lint_warnings)
+
+    @pytest.mark.asyncio
+    async def test_install_local_plugin_dual_writes_installed_plugin(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        local_root = tmp_path / "local_imports"
+        _write_runtime_plugin(local_root / "local_demo", key="local_demo", version="3.0.0")
+        monkeypatch.setattr(repo_svc, "_local_import_root", lambda: local_root)
+        db = _FakePluginRepoDB()
+
+        row = await repo_svc.install_local_plugin(db, "local_demo", default_enabled=False)
+
+        installed = db.installed_rows["local_demo"]
+        assert row.name == "local_demo"
+        assert installed.source == "local"
+        assert installed.source_url == "local://local_imports/local_demo"
+        assert installed.version == "3.0.0"
+        assert installed.enabled is False
+        assert installed.trust_tier == "local"
+        assert installed.source_label == "Local"
 
 
 class TestPluginMetadataSchema:

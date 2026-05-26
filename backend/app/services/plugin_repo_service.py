@@ -32,6 +32,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models.account import Account
 from ..db.models.feature import FEATURE_STATE_DISABLED, AccountFeature, Feature
+from ..db.models.plugin import (
+    PLUGIN_SOURCE_LOCAL,
+    PLUGIN_SOURCE_REPO,
+    PLUGIN_TRUST_COMMUNITY,
+    PLUGIN_TRUST_LOCAL,
+)
 from ..db.models.plugin_repo import PluginRepo
 from ..db.models.remote_plugin import RemotePlugin
 from ..schemas.plugin_repo import PluginRepoPlugin
@@ -43,12 +49,14 @@ from .remote_plugin_service import (
     RemotePluginError,
     _derive_name_from_url,
     _feature_manifest_from_meta,
+    _manifest_json_from_remote_meta,
     _plugin_dir,
     _read_plugin_metadata,
     _run_git,
     _validate_runtime_plugin_shape,
     _validate_source_url,
     lint_plugin_metadata_files,
+    upsert_installed_plugin,
 )
 
 log = logging.getLogger(__name__)
@@ -405,6 +413,7 @@ async def install_plugin_from_repo(
         ) from exc
 
     try:
+        lint_warnings = lint_plugin_metadata_files(install_path)
         rp_row = RemotePlugin(
             name=final_name,
             display_name=meta.display_name or final_name,
@@ -414,7 +423,7 @@ async def install_plugin_from_repo(
             version=meta.version,
             latest_version=meta.version,
             update_available=False,
-            lint_warnings=lint_plugin_metadata_files(install_path),
+            lint_warnings=lint_warnings,
             enabled=bool(default_enabled),
             default_enabled=default_enabled,
         )
@@ -439,6 +448,22 @@ async def install_plugin_from_repo(
             feat.is_builtin = False
             feat.manifest = _feature_manifest_from_meta(meta)
 
+        await db.flush()
+        await upsert_installed_plugin(
+            db,
+            key=final_name,
+            source=PLUGIN_SOURCE_REPO,
+            source_url=row.url,
+            installed_path=str(install_path),
+            version=meta.version,
+            manifest_json=_manifest_json_from_remote_meta(meta),
+            enabled=rp_row.enabled,
+            signature_ok=None,
+            trust_tier=PLUGIN_TRUST_COMMUNITY,
+            source_label="Plugin Repo",
+            last_install_error=None,
+            lint_warnings=lint_warnings,
+        )
         await db.flush()
 
         if default_enabled:
@@ -541,6 +566,7 @@ async def install_local_plugin(
         raise PluginRepoError("COPY_FAILED", f"复制本地插件目录失败: {exc}") from exc
 
     try:
+        lint_warnings = lint_plugin_metadata_files(install_path)
         rp_row = RemotePlugin(
             name=final_name,
             display_name=meta.display_name or final_name,
@@ -550,7 +576,7 @@ async def install_local_plugin(
             version=meta.version,
             latest_version=meta.version,
             update_available=False,
-            lint_warnings=lint_plugin_metadata_files(install_path),
+            lint_warnings=lint_warnings,
             enabled=bool(default_enabled),
             default_enabled=default_enabled,
         )
@@ -575,6 +601,22 @@ async def install_local_plugin(
             feat.is_builtin = False
             feat.manifest = _feature_manifest_from_meta(meta)
 
+        await db.flush()
+        await upsert_installed_plugin(
+            db,
+            key=final_name,
+            source=PLUGIN_SOURCE_LOCAL,
+            source_url=f"local://local_imports/{final_name}",
+            installed_path=str(install_path),
+            version=meta.version,
+            manifest_json=_manifest_json_from_remote_meta(meta),
+            enabled=rp_row.enabled,
+            signature_ok=None,
+            trust_tier=PLUGIN_TRUST_LOCAL,
+            source_label="Local",
+            last_install_error=None,
+            lint_warnings=lint_warnings,
+        )
         await db.flush()
 
         if default_enabled:

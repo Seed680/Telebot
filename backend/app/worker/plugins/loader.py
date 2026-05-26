@@ -1,7 +1,7 @@
 """账号级插件加载器：连接 Telethon、实例化每个启用的 [账号 × feature] 插件，并维护其生命周期。
 
 安全设计（阶段 E）：
-- 双开关检查：RemotePlugin.enabled AND AccountFeature.enabled 都为 true 才加载
+- installed 插件统一授权：安装记录全局开关 / 签名状态 / AccountFeature.enabled 都通过才加载
 - 插件命令注册表：追踪 owner/plugin_key/generation，插件 reload/disable 时自动注销
 - on_shutdown 保证调用（幂等设计）
 
@@ -9,7 +9,7 @@
 1. ``run_worker`` 在 ``client.connect()`` 前调 ``load_plugins_for_account``，本模块会：
    - 触发内置插件 import（``@register`` 写入全局注册表）
    - 在 ``client`` 上挂全局消息派发器（incoming + outgoing），按各插件的 ``message_channels`` 声明过滤
-   - 实例化该账号当前 RemotePlugin.enabled=True AND AccountFeature.enabled=True 的所有插件，并把状态写回为 active
+   - 实例化该账号当前通过授权检查的 enabled 插件，并把状态写回为 active
 2. 主进程通过 IPC ``CMD_RELOAD_CONFIG`` 触发 ``reload_account_config`` 实现热更新（拉新 rules / config，
    并对新增 / 移除的 feature 做差量加载与卸载）
 3. ``CMD_RELOAD_PLUGIN`` 调 ``reload_plugin``：builtin 走 ``importlib.reload``，installed 走按需重载
@@ -34,6 +34,7 @@ import re
 import shutil
 import time
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +45,6 @@ from ... import __version__ as TELEPILOT_VERSION
 from ...db.base import AsyncSessionLocal
 from ...db.models.account import Account, HumanizeConfig, SudoUser
 from ...db.models.feature import (
-    FEATURE_CODEX_IMAGE,
     FEATURE_SCHEDULER,
     FEATURE_STATE_ACTIVE,
     FEATURE_STATE_DISABLED,
@@ -52,6 +52,7 @@ from ...db.models.feature import (
     AccountFeature,
 )
 from ...db.models.ignored_peer import IgnoredPeer
+from ...db.models.plugin import PluginInstall
 from ...db.models.remote_plugin import RemotePlugin
 from ...db.models.rule import Rule
 from ...db.models.system import SystemSetting
@@ -68,6 +69,17 @@ from .base import Plugin, PluginContext, all_plugins, get_plugin
 from .manifest import Manifest
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _InstalledPluginAuthorization:
+    """运行期 installed 插件加载授权结果。"""
+
+    allowed: bool
+    state: str = FEATURE_STATE_ACTIVE
+    last_error: str | None = None
+    log_level: str = "info"
+    log_message: str = ""
 
 
 # 不在每次消息都查 DB；启动 + reload 时刷新一次，足够快
@@ -272,6 +284,53 @@ def _manifest_compatible(manifest: Manifest) -> tuple[bool, str | None]:
     return True, None
 
 
+def _restore_registry_after_failed_load(
+    snapshot: dict[str, type[Plugin]],
+    *,
+    path_key: str,
+    cls: Any = None,
+    manifest: Manifest | None = None,
+) -> None:
+    """Rollback registry side effects from a plugin import that failed validation."""
+
+    from .base import _REGISTRY
+
+    candidate_keys = {path_key}
+    for value in (getattr(cls, "key", None), getattr(manifest, "key", None)):
+        if value:
+            candidate_keys.add(str(value))
+    for key in candidate_keys:
+        previous = snapshot.get(key)
+        if previous is None:
+            _REGISTRY.pop(key, None)
+        else:
+            _REGISTRY[key] = previous
+
+
+def _restore_full_registry_snapshot(snapshot: dict[str, type[Plugin]]) -> None:
+    from .base import _REGISTRY
+
+    _REGISTRY.clear()
+    _REGISTRY.update(snapshot)
+
+
+def _validate_plugin_identity(path: Path, cls: Any, manifest: Manifest) -> tuple[bool, str | None]:
+    """Require directory name, manifest key and Plugin.key to describe one plugin."""
+
+    if not isinstance(cls, type) or not issubclass(cls, Plugin):
+        return False, "PLUGIN_CLASS 必须是 Plugin 子类"
+    path_key = path.name
+    class_key = str(getattr(cls, "key", "") or "")
+    manifest_key = str(getattr(manifest, "key", "") or "")
+    if not manifest_key:
+        return False, "MANIFEST.key 不能为空"
+    if manifest_key != path_key:
+        return False, f"MANIFEST.key={manifest_key!r} 与目录名 {path_key!r} 不一致"
+    if class_key != manifest_key:
+        return False, f"Plugin.key={class_key!r} 与 MANIFEST.key={manifest_key!r} 不一致"
+    return True, None
+
+
 def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
     """从单个插件目录加载 ``PLUGIN_CLASS`` 与 ``MANIFEST``；失败返回 {} 并写日志。
 
@@ -288,6 +347,9 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
     if not init_file.exists():
         log.warning("插件目录 %s 缺少 __init__.py，跳过", path)
         return {}
+    from .base import _REGISTRY  # 延迟 import 避免循环
+
+    registry_snapshot = dict(_REGISTRY)
 
     try:
         if source == "builtin":
@@ -319,12 +381,19 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
                 raise
     except Exception:  # noqa: BLE001
         log.exception("加载插件目录 %s 失败", path)
+        _restore_full_registry_snapshot(registry_snapshot)
+        if source == "installed":
+            _clear_installed_module_cache(path.name)
+            _restore_full_registry_snapshot(registry_snapshot)
         return {}
 
     cls = getattr(mod, "PLUGIN_CLASS", None)
     manifest = getattr(mod, "MANIFEST", None)
     if cls is None or manifest is None:
         log.warning("插件 %s 缺少 PLUGIN_CLASS 或 MANIFEST，跳过", path)
+        if source == "installed":
+            _clear_installed_module_cache(path.name)
+        _restore_registry_after_failed_load(registry_snapshot, path_key=path.name, cls=cls)
         return {}
     if not isinstance(manifest, Manifest):
         log.warning(
@@ -332,10 +401,33 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
             path,
             type(manifest).__name__,
         )
+        if source == "installed":
+            _clear_installed_module_cache(path.name)
+        _restore_registry_after_failed_load(registry_snapshot, path_key=path.name, cls=cls)
+        return {}
+    identity_ok, identity_reason = _validate_plugin_identity(path, cls, manifest)
+    if not identity_ok:
+        log.warning("插件 %s 身份不一致，跳过: %s", path, identity_reason)
+        if source == "installed":
+            _clear_installed_module_cache(path.name)
+        _restore_registry_after_failed_load(
+            registry_snapshot,
+            path_key=path.name,
+            cls=cls,
+            manifest=manifest,
+        )
         return {}
     ok, reason = _manifest_compatible(manifest)
     if not ok:
         log.warning("插件 %s manifest 不兼容，跳过: %s", manifest.key, reason)
+        if source == "installed":
+            _clear_installed_module_cache(path.name)
+        _restore_registry_after_failed_load(
+            registry_snapshot,
+            path_key=path.name,
+            cls=cls,
+            manifest=manifest,
+        )
         return {}
 
     # 把 manifest / source 挂到 plugin 类上，方便 API 层暴露给前端
@@ -344,8 +436,6 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
 
     # 防御性写入注册表：plugin.py 里若有 @register 已经写过；此处再写一次幂等
     # （主要是为了第三方插件——它们的 plugin.py 也应当 @register，但兜底一下）
-    from .base import _REGISTRY  # 延迟 import 避免循环
-
     _REGISTRY[manifest.key] = cls
     return {manifest.key: cls}
 
@@ -403,6 +493,120 @@ def _installed_plugin_exists(plugin_key: str) -> bool:
     except ValueError:
         return False
     return legacy_path.is_dir()
+
+
+async def _authorize_installed_plugin(db: Any, plugin_key: str) -> _InstalledPluginAuthorization:
+    """统一判断 installed 插件是否允许被 worker 加载。
+
+    第三方插件目录可能来自 zip、Git 远程仓库、历史本地残留或手工拷贝。
+    worker 只认数据库里的安装记录；磁盘上有目录但两张安装表都没有记录时，
+    一律视为 orphan 并拒绝加载。
+    """
+
+    plugin_install = await db.get(PluginInstall, plugin_key)
+    remote_plugin = (
+        await db.execute(select(RemotePlugin).where(RemotePlugin.name == plugin_key))
+    ).scalar_one_or_none()
+
+    if plugin_install is None and remote_plugin is None:
+        return _InstalledPluginAuthorization(
+            allowed=False,
+            state=FEATURE_STATE_FAILED,
+            last_error="PLUGIN_LOAD_ORPHAN: orphan plugin (no install record)",
+            log_level="warn",
+            log_message=(
+                f"installed 插件 {plugin_key} 在磁盘/feature 中存在，但没有 PluginInstall "
+                "或 RemotePlugin 安装记录，已拒绝加载"
+            ),
+        )
+
+    if plugin_install is not None:
+        if not bool(getattr(plugin_install, "enabled", False)):
+            return _InstalledPluginAuthorization(
+                allowed=False,
+                state=FEATURE_STATE_DISABLED,
+                last_error="PLUGIN_DISABLED: PluginInstall.enabled=False",
+                log_level="info",
+                log_message=f"installed 插件 {plugin_key} 的 PluginInstall.enabled=False，跳过加载",
+            )
+        signature_ok = getattr(plugin_install, "signature_ok", None)
+        if signature_ok is False:
+            return _InstalledPluginAuthorization(
+                allowed=False,
+                state=FEATURE_STATE_FAILED,
+                last_error="PLUGIN_SIGNATURE_FAILED: PluginInstall.signature_ok=False",
+                log_level="warn",
+                log_message=f"installed 插件 {plugin_key} 签名校验失败，已拒绝加载",
+            )
+        if signature_ok is None and not bool(app_settings.plugin_allow_legacy_unsigned_plugins):
+            return _InstalledPluginAuthorization(
+                allowed=False,
+                state=FEATURE_STATE_FAILED,
+                last_error="PLUGIN_SIGNATURE_UNKNOWN: legacy unsigned plugin is not allowed",
+                log_level="warn",
+                log_message=(
+                    f"installed 插件 {plugin_key} 是历史未签名插件，"
+                    "且 plugin_allow_legacy_unsigned_plugins=False，已拒绝加载"
+                ),
+            )
+
+    if remote_plugin is not None and not bool(getattr(remote_plugin, "enabled", False)):
+        return _InstalledPluginAuthorization(
+            allowed=False,
+            state=FEATURE_STATE_DISABLED,
+            last_error="PLUGIN_DISABLED: RemotePlugin.enabled=False",
+            log_level="info",
+            log_message=f"installed 插件 {plugin_key} 的 RemotePlugin.enabled=False，跳过加载",
+        )
+
+    return _InstalledPluginAuthorization(allowed=True)
+
+
+async def _write_account_feature_load_state(
+    db: Any,
+    account_id: int,
+    feature_key: str,
+    *,
+    state: str,
+    last_error: str | None,
+) -> None:
+    """写回插件加载状态，供前端模块中心展示。"""
+
+    await db.execute(
+        update(AccountFeature)
+        .where(
+            AccountFeature.account_id == account_id,
+            AccountFeature.feature_key == feature_key,
+        )
+        .values(state=state, last_error=last_error)
+    )
+    await db.commit()
+
+
+async def _deny_installed_plugin_load(
+    db: Any,
+    redis: Any,
+    account_id: int,
+    plugin_key: str,
+    auth: _InstalledPluginAuthorization,
+) -> None:
+    """记录 installed 插件授权失败并同步账号功能状态。"""
+
+    await _log(
+        redis,
+        account_id,
+        auth.log_level,
+        auth.log_message or f"installed 插件 {plugin_key} 未通过加载授权",
+        source="system",
+        plugin_key=plugin_key,
+    )
+    await _write_account_feature_load_state(
+        db,
+        account_id,
+        plugin_key,
+        state=auth.state,
+        last_error=auth.last_error,
+    )
 
 
 def _load_builtin_plugin(plugin_key: str) -> dict[str, type[Plugin]]:
@@ -693,8 +897,9 @@ async def load_plugins_for_account(
                     continue
                 if edited and getattr(type(inst), handler_name, None) is getattr(Plugin, handler_name, None):
                     continue
+                plugin_event = _wrap_event_for_context(event, ctx)
                 try:
-                    await handler(ctx, event)
+                    await handler(ctx, plugin_event)
                 except Exception as exc:  # noqa: BLE001
                     await _log(
                         redis,
@@ -741,10 +946,10 @@ async def load_plugins_for_account(
 async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) -> None:
     """根据 ``account_feature`` 行实例化对应插件，调 ``on_startup``，写状态。
 
-    **安全：双开关检查**
-    - RemotePlugin.enabled = 全局可用开关（第三方插件总开关）
-    - AccountFeature.enabled = 某账号启用开关
-    - 两者都 true 才能加载
+    **安全：加载授权检查**
+    - builtin 插件只看 AccountFeature.enabled
+    - installed 插件必须有 PluginInstall 或 RemotePlugin 安装记录
+    - installed 插件的全局开关、签名状态、账号开关都允许时才加载
 
     Args:
         db: AsyncSession
@@ -771,38 +976,17 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         _load_builtin_plugin(af.feature_key)
         cls = get_plugin(af.feature_key)
     if cls is None:
-        rp = (
-            await db.execute(
-                select(RemotePlugin).where(RemotePlugin.name == af.feature_key)
-            )
-        ).scalar_one_or_none()
-        if rp is not None:
-            if not rp.enabled:
-                await _log(
+        if _installed_plugin_exists(af.feature_key):
+            auth = await _authorize_installed_plugin(db, af.feature_key)
+            if not auth.allowed:
+                await _deny_installed_plugin_load(
+                    db,
                     redis,
                     state.account_id,
-                    "info",
-                    f"feature {af.feature_key} 的 RemotePlugin.enabled=False，跳过加载",
+                    af.feature_key,
+                    auth,
                 )
-                await db.execute(
-                    update(AccountFeature)
-                    .where(
-                        AccountFeature.account_id == state.account_id,
-                        AccountFeature.feature_key == af.feature_key,
-                    )
-                    .values(state=FEATURE_STATE_DISABLED)
-                )
-                await db.commit()
                 return
-            _load_installed_plugin(af.feature_key)
-            cls = get_plugin(af.feature_key)
-        elif af.feature_key == FEATURE_CODEX_IMAGE and _installed_plugin_exists(af.feature_key):
-            await _log(
-                redis,
-                state.account_id,
-                "info",
-                "检测到旧版 plugins/installed/codex_image 残留，按历史兼容路径加载",
-            )
             _load_installed_plugin(af.feature_key)
             cls = get_plugin(af.feature_key)
     if cls is None:
@@ -813,54 +997,29 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
             "warn",
             log_message,
         )
-        await db.execute(
-            update(AccountFeature)
-            .where(
-                AccountFeature.account_id == state.account_id,
-                AccountFeature.feature_key == af.feature_key,
-            )
-            .values(state=FEATURE_STATE_FAILED, last_error=last_error)
+        await _write_account_feature_load_state(
+            db,
+            state.account_id,
+            af.feature_key,
+            state=FEATURE_STATE_FAILED,
+            last_error=last_error,
         )
-        await db.commit()
         return
 
-    # ── 安全：双开关检查 ──
-    # 第三方插件（source=installed）需要检查 RemotePlugin.enabled
+    # ── 安全：installed 插件统一授权检查 ──
     plugin_source = getattr(cls, "_source", "builtin")
     if plugin_source == "installed":
-        rp = (
-            await db.execute(
-                select(RemotePlugin).where(RemotePlugin.name == af.feature_key)
-            )
-        ).scalar_one_or_none()
-        if rp is None:
-            if af.feature_key == FEATURE_CODEX_IMAGE:
-                await _log(
-                    redis,
-                    state.account_id,
-                    "info",
-                    "codex_image 来自旧版 installed 残留且 remote_plugin 行不存在；按历史兼容路径继续加载",
-                )
-                rp = None
-            else:
-                await _log(
-                    redis,
-                    state.account_id,
-                    "warn",
-                    f"feature {af.feature_key} 是 installed 插件但 remote_plugin 行不存在",
-                )
-                return
-        if rp is None:
-            pass
-        elif not rp.enabled:
-            await _log(
+        auth = await _authorize_installed_plugin(db, af.feature_key)
+        if not auth.allowed:
+            await _deny_installed_plugin_load(
+                db,
                 redis,
                 state.account_id,
-                "info",
-                f"feature {af.feature_key} 的 RemotePlugin.enabled=False，跳过加载",
+                af.feature_key,
+                auth,
             )
             return
-    # ── 双开关检查结束 ──
+    # ── installed 授权检查结束 ──
 
     # 拉规则（按 priority 倒序：值越大越先匹配）
     rules = (
@@ -892,6 +1051,33 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
     effective_config = await _merge_plugin_config(
         db, state.account_id, af.feature_key, dict(af.config or {})
     )
+    plugin_permissions = set(plugin_manifest.permissions or []) if plugin_manifest is not None else set()
+    plugin_http: Any = None
+    if plugin_manifest is not None and "external_http" in plugin_permissions:
+        allowed_hosts = list(getattr(plugin_manifest, "allowed_hosts", None) or [])
+        if allowed_hosts:
+            from .http_facade import PluginHTTP  # 延迟 import，避免未用 HTTP 的插件增加依赖面
+
+            plugin_http = PluginHTTP.from_context(
+                PluginContext(
+                    account_id=state.account_id,
+                    feature_key=af.feature_key,
+                    config=effective_config,
+                    account_proxy_url=state.account_proxy_url,
+                ),
+                allowed_hosts=allowed_hosts,
+                manifest_http=getattr(plugin_manifest, "http", None),
+            )
+    plugin_ai: Any = None
+    if plugin_manifest is not None and "ai_text" in plugin_permissions:
+        from .ai_facade import PluginAI  # 延迟 import，避免未用 AI 的插件增加依赖面
+
+        plugin_ai = PluginAI.from_context(
+            PluginContext(
+                account_id=state.account_id,
+                feature_key=af.feature_key,
+            )
+        )
 
     ctx = PluginContext(
         account_id=state.account_id,
@@ -906,6 +1092,8 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
             state.scheduler.for_plugin(af.feature_key, state.generation)
             if state.scheduler is not None else None
         ),
+        http=plugin_http,
+        ai=plugin_ai,
         generation=state.generation,
         account_proxy_url=state.account_proxy_url,
     )
@@ -962,9 +1150,25 @@ def _wrap_cmd(fn, ctx: PluginContext):
 
     async def w(client, event, args, account_id):  # noqa: ANN001
         plugin_client = ctx.client if ctx.client is not None else client
-        await fn(plugin_client, event, args, account_id, ctx)
+        plugin_event = _wrap_event_for_context(event, ctx)
+        await fn(plugin_client, plugin_event, args, account_id, ctx)
 
     return w
+
+
+def _wrap_event_for_context(event: Any, ctx: PluginContext) -> Any:
+    """Installed plugins receive a SandboxEvent so event helpers honor permissions."""
+
+    client = ctx.client
+    if client is None:
+        return event
+    try:
+        from .sandbox import SandboxClient, SandboxEvent
+    except Exception:  # noqa: BLE001
+        return event
+    if type(client) is SandboxClient or bool(getattr(client, "is_sandbox_client", False)):
+        return SandboxEvent(event, client, plugin_key=ctx.feature_key)
+    return event
 
 
 def _make_logger(redis: Any, account_id: int, plugin_key: str):
@@ -1101,17 +1305,14 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
             ).scalar_one_or_none()
             cls = get_plugin(fkey)
             plugin_source = getattr(cls, "_source", "builtin") if cls is not None else "builtin"
-            remote_disabled = False
+            auth_denied: _InstalledPluginAuthorization | None = None
             if plugin_source == "installed":
-                rp = (
-                    await db.execute(
-                        select(RemotePlugin).where(RemotePlugin.name == fkey)
-                    )
-                ).scalar_one_or_none()
-                remote_disabled = rp is None or not rp.enabled
+                auth = await _authorize_installed_plugin(db, fkey)
+                if not auth.allowed:
+                    auth_denied = auth
 
             force_reload = reload_plugin_key == fkey
-            if af is None or not af.enabled or remote_disabled or force_reload:
+            if af is None or not af.enabled or auth_denied is not None or force_reload:
                 ctx = state.contexts.get(fkey)
                 inst = state.instances.get(fkey)
 
@@ -1133,17 +1334,23 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
 
                 state.instances.pop(fkey, None)
                 state.contexts.pop(fkey, None)
-                if af is not None and (not af.enabled or remote_disabled):
+                if af is not None and not af.enabled:
                     # 同时写状态为 disabled，便于前端展示
-                    await db.execute(
-                        update(AccountFeature)
-                        .where(
-                            AccountFeature.account_id == account_id,
-                            AccountFeature.feature_key == fkey,
-                        )
-                        .values(state=FEATURE_STATE_DISABLED)
+                    await _write_account_feature_load_state(
+                        db,
+                        account_id,
+                        fkey,
+                        state=FEATURE_STATE_DISABLED,
+                        last_error=None,
                     )
-                    await db.commit()
+                elif af is not None and auth_denied is not None:
+                    await _deny_installed_plugin_load(
+                        db,
+                        redis,
+                        account_id,
+                        fkey,
+                        auth_denied,
+                    )
                 continue
             # 仍启用：刷新 rules + config
             rules = (

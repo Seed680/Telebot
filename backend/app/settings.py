@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     # 上传 zip 时验签使用的 Ed25519 公钥（PEM）；为空表示不验签，前端给出"未签名"警告。
     # 公钥示例：-----BEGIN PUBLIC KEY-----\nMC...\n-----END PUBLIC KEY-----
     plugin_pubkey: str = ""
+    # 兼容旧版本已安装且 signature_ok=NULL 的 zip 插件；新安装流程仍强制验签通过。
+    # 设为 false 后，历史未签名插件即使 PluginInstall.enabled=true 也不会被 worker 加载。
+    plugin_allow_legacy_unsigned_plugins: bool = True
     # 上传 zip 体积上限（字节），默认 10 MiB。超出直接 413。
     plugin_zip_max_bytes: int = 10 * 1024 * 1024
 
@@ -99,6 +102,9 @@ class Settings(BaseSettings):
     llm_premium_daily_request_limit_per_account: int = 0
     # 0 表示不覆盖调用方传入的 max_tokens。
     llm_max_output_tokens: int = 0
+    # 第三方插件 ctx.ai 的额外保护上限；插件只能请求文本补全，且输出/超时默认收紧。
+    plugin_ai_max_output_tokens: int = 4096
+    plugin_ai_timeout_seconds: int = 60
 
     # ── 启动期自动迁移 ────────────────────────────────────────────
     # True = backend 启动时自动 ``alembic upgrade head``，把 DB schema 升到代码期望的版本

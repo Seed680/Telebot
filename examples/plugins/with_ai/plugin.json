@@ -1,0 +1,25 @@
+{
+  "name": "with_ai",
+  "display_name": "AI 示例",
+  "description": "演示第三方模块通过 ctx.ai 使用平台文本 LLM facade。",
+  "author": "examples",
+  "version": "0.1.0",
+  "entry": "plugin.py",
+  "min_telepilot_version": "0.24.0",
+  "commands": ["ai_providers", "ai_complete"],
+  "category": "utility",
+  "permissions": ["ai_text", "edit_message"],
+  "config_schema": {
+    "type": "object",
+    "x-ui-mode": "single",
+    "additionalProperties": false,
+    "properties": {
+      "provider_tag": {
+        "type": "string",
+        "title": "Provider 标签",
+        "default": "chat",
+        "description": "可选：优先选择带有该 tag 的可用 provider。"
+      }
+    }
+  }
+}
