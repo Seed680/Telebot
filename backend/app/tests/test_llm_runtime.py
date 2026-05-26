@@ -213,6 +213,7 @@ def test_usage_record_fields() -> None:
     """UsageRecord 包含所有必要字段。"""
     record = UsageRecord(
         provider_id=42,
+        triggered_by_account_id=123,
         provider_name="test-provider",
         model="gpt-4o",
         input_tokens=100,
@@ -223,12 +224,55 @@ def test_usage_record_fields() -> None:
         fallback_chain=["test-provider"],
     )
     assert record.provider_id == 42
+    assert record.triggered_by_account_id == 123
     assert record.provider_name == "test-provider"
     assert record.model == "gpt-4o"
     assert record.input_tokens == 100
     assert record.output_tokens == 50
     assert record.success is True
     assert record.used_fallback is False
+
+
+@pytest.mark.asyncio
+async def test_llm_usage_persist_writes_triggered_by_account_id(monkeypatch) -> None:
+    """UsageRecord 持久化时写入 triggered_by_account_id。"""
+    from app.services import llm_usage_service
+
+    record = UsageRecord(
+        account_id=7,
+        triggered_by_account_id=123,
+        provider_id=42,
+        provider_name="test-provider",
+        model="gpt-4o",
+        input_tokens=10,
+        output_tokens=5,
+        success=True,
+        fallback_chain=["test-provider"],
+    )
+    captured_rows = []
+
+    class _FakeDB:
+        def add(self, row) -> None:
+            captured_rows.append(row)
+
+        async def commit(self) -> None:
+            return None
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self._db = _FakeDB()
+
+        async def __aenter__(self):
+            return self._db
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    monkeypatch.setattr(llm_usage_service, "AsyncSessionLocal", _FakeSession)
+    await llm_usage_service._persist_usage(record)
+
+    assert len(captured_rows) == 1
+    assert captured_rows[0].triggered_by_account_id == 123
 
 
 # ════════════════════════════════════════════════════════════

@@ -341,6 +341,7 @@ async def test_service_ai_runtime_delegates_shared_fallback_logic(monkeypatch) -
         max_tokens=99,
         images=[b"img"],
         account_id=7,
+        triggered_by_account_id=123,
         source="scheduler",
         fallback_provider_id=2,
         matched_tag="scheduler",
@@ -356,6 +357,7 @@ async def test_service_ai_runtime_delegates_shared_fallback_logic(monkeypatch) -
     kwargs = call.await_args.kwargs
     assert kwargs["source"] == "scheduler"
     assert kwargs["account_id"] == 7
+    assert kwargs["triggered_by_account_id"] == 123
     assert kwargs["override_model"] == "custom"
     assert kwargs["max_tokens"] == 99
     assert kwargs["images"] == [b"img"]
@@ -398,12 +400,14 @@ async def test_worker_ai_runtime_uses_shared_service_invoke(monkeypatch) -> None
     event.message.audio = None
     tpl = {"name": "ai", "type": "ai", "config": {"provider_id": 1}}
 
-    await ai_runtime.invoke(client, event, ["hello"], tpl, 1)
+    await ai_runtime.invoke(client, event, ["hello"], tpl, 1, triggered_by_account_id=123)
 
     invoke_mock.assert_awaited_once()
     provider_dto, provider_map, system, user_msg = invoke_mock.await_args.args[:4]
+    kwargs = invoke_mock.await_args.kwargs
     assert provider_dto.id == 1
     assert provider_map[1].name == "primary"
     assert user_msg == "hello"
+    assert kwargs["triggered_by_account_id"] == 123
     assert "严格规则" in system
     event.edit.assert_awaited()

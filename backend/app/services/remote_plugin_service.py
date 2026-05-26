@@ -961,6 +961,7 @@ async def install(
 
     final_name = name or _derive_name_from_url(source_url)
     target = _plugin_dir(final_name)
+    staging = target.parent / f"{target.name}.installing"
 
     # 2. 重名拦截：先查 DB，再查目录
     existing = (
@@ -975,23 +976,28 @@ async def install(
         raise DuplicatePluginName(
             "DIR_EXISTS", f"目录已存在但 DB 无记录: {target}（请先手动清理）"
         )
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
 
     # 3. 确保父目录存在
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    # 4. git clone（带 timeout，防止挂起）
+    renamed = False
+    # 4. git clone 到 staging（带 timeout，防止挂起）
     try:
-        await _run_git("clone", "--depth", "1", source_url, str(target), timeout=180.0)
+        await _run_git("clone", "--depth", "1", source_url, str(staging), timeout=180.0)
     except GitOperationFailed:
         # 失败时清理可能产生的部分目录
-        if target.exists():
-            shutil.rmtree(target, ignore_errors=True)
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
         raise
 
     try:
-        meta = _read_plugin_metadata(target, fallback_name=final_name)
-        _validate_runtime_plugin_shape(target, meta)
-        lint_warnings = lint_plugin_metadata_files(target)
+        meta = _read_plugin_metadata(staging, fallback_name=final_name)
+        _validate_runtime_plugin_shape(staging, meta)
+        lint_warnings = lint_plugin_metadata_files(staging)
+        staging.rename(target)
+        renamed = True
         row = RemotePlugin(
             name=final_name,
             display_name=meta.display_name or final_name,
@@ -1066,8 +1072,11 @@ async def install(
             await db.flush()
 
     except Exception:
-        # 元数据/写库失败 → 回滚文件系统的 clone
-        shutil.rmtree(target, ignore_errors=True)
+        # 元数据/写库失败 → 回滚文件系统目录
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        if renamed and target.exists():
+            shutil.rmtree(target, ignore_errors=True)
         raise
 
     return row
@@ -1184,30 +1193,44 @@ async def update(db: AsyncSession, name: str) -> RemotePlugin:
                 if candidate_meta.name == name:
                     source_dir = candidate
                     break
-            if source_dir is None:
-                raise RemotePluginError(
-                    "PLUGIN_NOT_IN_REPO",
-                    f"仓库 {row.source_url!r} 内未找到插件 {name!r}",
-                )
+        if source_dir is None:
+            raise RemotePluginError(
+                "PLUGIN_NOT_IN_REPO",
+                f"仓库 {row.source_url!r} 内未找到插件 {name!r}",
+            )
 
-            backup = target.with_name(f"{target.name}.bak-update")
-            if backup.exists():
-                shutil.rmtree(backup, ignore_errors=True)
+        staging = target.with_name(f"{target.name}.installing")
+        backup = target.with_name(f"{target.name}.bak-update")
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+        swapped = False
+        try:
+            shutil.copytree(
+                source_dir,
+                staging,
+                ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
+            )
+            staged_meta = _read_plugin_metadata(staging, fallback_name=name)
+            _validate_runtime_plugin_shape(staging, staged_meta)
             target.rename(backup)
-            try:
-                shutil.copytree(
-                    source_dir,
-                    target,
-                    ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
-                )
-            except Exception:
-                if target.exists():
-                    shutil.rmtree(target, ignore_errors=True)
+            staging.rename(target)
+            swapped = True
+        except Exception:
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            if backup.exists():
                 backup.rename(target)
-                raise
-            finally:
-                if backup.exists():
+            raise
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            if backup.exists():
+                if swapped:
                     shutil.rmtree(backup, ignore_errors=True)
+                elif not target.exists():
+                    backup.rename(target)
 
     meta = _read_plugin_metadata(target, fallback_name=name)
     _validate_runtime_plugin_shape(target, meta)

@@ -383,6 +383,7 @@ async def install_plugin_from_repo(
 
     # 多插件仓库子目录 → 复制 target_dir 到 plugins/installed/<final_name>/
     install_path = _plugin_dir(final_name)
+    staging = install_path.parent / f"{install_path.name}.installing"
 
     # 重名检查：DB 行 + 目录都不能存在
     existing = (
@@ -397,23 +398,30 @@ async def install_plugin_from_repo(
             "DIR_EXISTS",
             f"目录已存在但 DB 无记录: {install_path}（请先手动清理）",
         )
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
 
     install_path.parent.mkdir(parents=True, exist_ok=True)
+    renamed = False
     try:
         shutil.copytree(
             target_dir,
-            install_path,
+            staging,
             ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
         )
+        staged_meta = _read_plugin_metadata(staging, fallback_name=final_name)
+        _validate_runtime_plugin_shape(staging, staged_meta)
+        lint_warnings = lint_plugin_metadata_files(staging)
+        staging.rename(install_path)
+        renamed = True
     except Exception as exc:
-        if install_path.exists():
-            shutil.rmtree(install_path, ignore_errors=True)
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
         raise PluginRepoError(
             "COPY_FAILED", f"复制插件目录失败: {exc}"
         ) from exc
 
     try:
-        lint_warnings = lint_plugin_metadata_files(install_path)
         rp_row = RemotePlugin(
             name=final_name,
             display_name=meta.display_name or final_name,
@@ -489,7 +497,10 @@ async def install_plugin_from_repo(
             await db.flush()
     except Exception:
         # 写库 / 元数据失败 → 回滚已复制的目录
-        shutil.rmtree(install_path, ignore_errors=True)
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        if renamed and install_path.exists():
+            shutil.rmtree(install_path, ignore_errors=True)
         raise
 
     return rp_row
@@ -544,6 +555,7 @@ async def install_local_plugin(
     _validate_runtime_plugin_shape(target_dir, meta)
     final_name = meta.name
     install_path = _plugin_dir(final_name)
+    staging = install_path.parent / f"{install_path.name}.installing"
 
     existing = (
         await db.execute(select(RemotePlugin).where(RemotePlugin.name == final_name))
@@ -552,21 +564,28 @@ async def install_local_plugin(
         raise DuplicatePluginName("PLUGIN_EXISTS", f"插件 {final_name!r} 已安装")
     if install_path.exists():
         raise DuplicatePluginName("DIR_EXISTS", f"目录已存在但 DB 无记录: {install_path}")
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
 
     install_path.parent.mkdir(parents=True, exist_ok=True)
+    renamed = False
     try:
         shutil.copytree(
             target_dir,
-            install_path,
+            staging,
             ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
         )
+        staged_meta = _read_plugin_metadata(staging, fallback_name=final_name)
+        _validate_runtime_plugin_shape(staging, staged_meta)
+        lint_warnings = lint_plugin_metadata_files(staging)
+        staging.rename(install_path)
+        renamed = True
     except Exception as exc:
-        if install_path.exists():
-            shutil.rmtree(install_path, ignore_errors=True)
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
         raise PluginRepoError("COPY_FAILED", f"复制本地插件目录失败: {exc}") from exc
 
     try:
-        lint_warnings = lint_plugin_metadata_files(install_path)
         rp_row = RemotePlugin(
             name=final_name,
             display_name=meta.display_name or final_name,
@@ -639,9 +658,12 @@ async def install_local_plugin(
                             state=FEATURE_STATE_DISABLED,
                         )
                     )
-            await db.flush()
+        await db.flush()
     except Exception:
-        shutil.rmtree(install_path, ignore_errors=True)
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        if renamed and install_path.exists():
+            shutil.rmtree(install_path, ignore_errors=True)
         raise
 
     return rp_row

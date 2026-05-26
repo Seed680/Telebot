@@ -221,6 +221,7 @@ async def test_action_call_llm_uses_shared_service_invoke(monkeypatch) -> None:
         "prompt": "hello",
         "target_chat_id": 123,
         "fallback_provider_id": 8,
+        "triggered_by_account_id": 123,
         "system_prompt": "sys",
         "max_tokens": 32,
     }
@@ -233,6 +234,7 @@ async def test_action_call_llm_uses_shared_service_invoke(monkeypatch) -> None:
     assert provider_map[8].name == "fallback"
     assert system == "sys"
     assert user == "hello"
+    assert invoke_mock.await_args.kwargs["triggered_by_account_id"] == 123
     send_mock.assert_awaited_once_with(ctx, 123, "done")
 
 

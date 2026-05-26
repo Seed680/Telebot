@@ -20,6 +20,7 @@ async def _persist_usage(record: UsageRecord) -> None:
             db.add(
                 LLMUsage(
                     account_id=record.account_id,
+                    triggered_by_account_id=record.triggered_by_account_id,
                     provider_id=record.provider_id,
                     provider_name=record.provider_name,
                     model=record.model,
@@ -44,4 +45,3 @@ def ensure_llm_usage_callback_registered() -> None:
         return
     register_usage_callback(_persist_usage)
     _registered = True
-

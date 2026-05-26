@@ -33,6 +33,7 @@ async def invoke(
     timeout_seconds: int | None = None,
     native_image: bool = False,
     account_id: int | None = None,
+    triggered_by_account_id: int | None = None,
     source: str | None = None,
     fallback_provider_id: int | None = None,
     matched_tag: str | None = None,
@@ -90,6 +91,7 @@ async def invoke(
         native_image=native_image,
         client_factory=_build_runtime_client,
         account_id=account_id,
+        triggered_by_account_id=triggered_by_account_id,
         source=source,
     )
 

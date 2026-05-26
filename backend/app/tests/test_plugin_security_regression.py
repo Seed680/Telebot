@@ -874,7 +874,7 @@ class TestRemotePluginEnableFlow:
 
         async def _fake_clone(*args, **_kwargs):  # noqa: ANN001
             target = args[-1]
-            plugin_dir = tmp_path / "installed" / "git_demo"
+            plugin_dir = tmp_path / "installed" / "git_demo.installing"
             assert str(plugin_dir) == str(target)
             plugin_dir.mkdir(parents=True)
             (plugin_dir / "plugin.json").write_text(
@@ -911,6 +911,8 @@ class TestRemotePluginEnableFlow:
         assert installed.trust_tier == "community"
         assert installed.source_label == "Git"
         assert installed.last_install_error is None
+        assert (tmp_path / "installed" / "git_demo").is_dir()
+        assert not (tmp_path / "installed" / "git_demo.installing").exists()
         assert any("app.db.models.plugin" in item for item in installed.lint_warnings)
         assert any("httpx.get" in item and "timeout" in item for item in installed.lint_warnings)
 
@@ -1029,6 +1031,8 @@ class TestPluginRepoInstallFlow:
         assert installed.enabled is True
         assert installed.trust_tier == "community"
         assert installed.source_label == "Plugin Repo"
+        assert (tmp_path / "installed" / "repo_demo").is_dir()
+        assert not (tmp_path / "installed" / "repo_demo.installing").exists()
         assert any("httpx.get" in item and "timeout" in item for item in installed.lint_warnings)
 
     @pytest.mark.asyncio
@@ -1049,6 +1053,8 @@ class TestPluginRepoInstallFlow:
         assert installed.enabled is False
         assert installed.trust_tier == "local"
         assert installed.source_label == "Local"
+        assert (tmp_path / "installed" / "local_demo").is_dir()
+        assert not (tmp_path / "installed" / "local_demo.installing").exists()
 
 
 class TestPluginMetadataSchema:

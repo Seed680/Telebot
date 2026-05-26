@@ -134,7 +134,14 @@ def _optional_reasoning_effort(value: Any) -> str | None:
     return effort if effort in {"minimal", "low", "medium", "high"} else None
 
 
-async def invoke(client, event, args, tpl: dict[str, Any], account_id: int) -> None:
+async def invoke(
+    client,
+    event,
+    args,
+    tpl: dict[str, Any],
+    account_id: int,
+    triggered_by_account_id: int | None = None,
+) -> None:
     from .command import (
         _humanize_llm_error,
         _replied_media_placeholder,
@@ -612,6 +619,8 @@ async def invoke(client, event, args, tpl: dict[str, Any], account_id: int) -> N
             timeout_seconds=timeout_seconds,
             native_image=native_image_mode,
             account_id=account_id,
+            # TODO(interactive-bot): 由上游交互 Bot 入口写入真实 trigger account id。
+            triggered_by_account_id=triggered_by_account_id,
             source=f"command:{tpl.get('name') or 'ai'}",
             fallback_provider_id=fallback_provider_id,
             matched_tag=routing_matched_tag,

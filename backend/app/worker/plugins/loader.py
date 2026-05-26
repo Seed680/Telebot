@@ -52,7 +52,7 @@ from ...db.models.feature import (
     AccountFeature,
 )
 from ...db.models.ignored_peer import IgnoredPeer
-from ...db.models.plugin import PluginInstall
+from ...db.models.plugin import InstalledPlugin, PluginInstall, PLUGIN_TRUST_ORPHAN
 from ...db.models.remote_plugin import RemotePlugin
 from ...db.models.rule import Rule
 from ...db.models.system import SystemSetting
@@ -147,6 +147,8 @@ def _scan_builtin_dirs() -> list[Path]:
 # 内置插件模块名清单（运行期由扫描得出，保留 tuple 类型以兼容现有测试）
 # 每次 import loader 时刷新一次；新增 builtin 子目录无需改这里。
 _BUILTIN_MODULES: tuple[str, ...] = tuple(p.name for p in _scan_builtin_dirs())
+# installed 插件模块名清单：用来避免每次清理都全量扫 sys.modules。
+_INSTALLED_MODULE_NAMES: set[str] = set()
 
 _SUPPORTED_FACADE_PERMISSIONS: set[str] = {
     "external_http",
@@ -215,9 +217,19 @@ def _clear_installed_module_cache(plugin_key: str) -> None:
     import sys as _sys
 
     mod_name = _installed_module_name(plugin_key)
-    for name in list(_sys.modules):
-        if name == mod_name or name.startswith(f"{mod_name}."):
+    if _INSTALLED_MODULE_NAMES:
+        tracked_names = [
+            name
+            for name in _INSTALLED_MODULE_NAMES
+            if name == mod_name or name.startswith(f"{mod_name}.")
+        ]
+        for name in tracked_names:
             _sys.modules.pop(name, None)
+            _INSTALLED_MODULE_NAMES.discard(name)
+    else:
+        for name in list(_sys.modules):
+            if name == mod_name or name.startswith(f"{mod_name}."):
+                _sys.modules.pop(name, None)
     _importlib.invalidate_caches()
     try:
         from .base import _REGISTRY
@@ -387,6 +399,11 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
             _sys.modules[mod_name] = mod
             try:
                 spec.loader.exec_module(mod)
+                _INSTALLED_MODULE_NAMES.update(
+                    name
+                    for name in _sys.modules
+                    if name == mod_name or name.startswith(f"{mod_name}.")
+                )
             except Exception:
                 _sys.modules.pop(mod_name, None)
                 raise
@@ -506,7 +523,83 @@ def _installed_plugin_exists(plugin_key: str) -> bool:
     return legacy_path.is_dir()
 
 
-async def _authorize_installed_plugin(db: Any, plugin_key: str) -> _InstalledPluginAuthorization:
+async def _authorize_via_installed_plugin(
+    db: Any, plugin_key: str
+) -> _InstalledPluginAuthorization:
+    """按 installed_plugin 表做一次并行授权判断（用于双读一致性比对）。"""
+
+    installed_plugin = await db.get(InstalledPlugin, plugin_key)
+    if installed_plugin is None:
+        return _InstalledPluginAuthorization(
+            allowed=False,
+            state=FEATURE_STATE_FAILED,
+            last_error="PLUGIN_LOAD_ORPHAN: installed_plugin missing",
+            log_level="warn",
+            log_message=f"installed 插件 {plugin_key} 缺少 installed_plugin 记录，已拒绝加载",
+        )
+
+    if not bool(getattr(installed_plugin, "enabled", False)):
+        return _InstalledPluginAuthorization(
+            allowed=False,
+            state=FEATURE_STATE_DISABLED,
+            last_error="PLUGIN_DISABLED: installed_plugin.enabled=False",
+            log_level="info",
+            log_message=f"installed 插件 {plugin_key} 的 installed_plugin.enabled=False，跳过加载",
+        )
+
+    if str(getattr(installed_plugin, "trust_tier", "")) == PLUGIN_TRUST_ORPHAN:
+        return _InstalledPluginAuthorization(
+            allowed=False,
+            state=FEATURE_STATE_FAILED,
+            last_error="PLUGIN_LOAD_ORPHAN: installed_plugin.trust_tier=orphan",
+            log_level="warn",
+            log_message=f"installed 插件 {plugin_key} trust_tier=orphan，已拒绝加载",
+        )
+
+    signature_ok = getattr(installed_plugin, "signature_ok", None)
+    if signature_ok is False:
+        return _InstalledPluginAuthorization(
+            allowed=False,
+            state=FEATURE_STATE_FAILED,
+            last_error="PLUGIN_SIGNATURE_FAILED: installed_plugin.signature_ok=False",
+            log_level="warn",
+            log_message=f"installed 插件 {plugin_key} 的 installed_plugin.signature_ok=False，已拒绝加载",
+        )
+    if signature_ok is None and not bool(app_settings.plugin_allow_legacy_unsigned_plugins):
+        return _InstalledPluginAuthorization(
+            allowed=False,
+            state=FEATURE_STATE_FAILED,
+            last_error="PLUGIN_SIGNATURE_UNKNOWN: installed_plugin.signature_ok is null",
+            log_level="warn",
+            log_message=(
+                f"installed 插件 {plugin_key} 的 installed_plugin.signature_ok=NULL，"
+                "且 plugin_allow_legacy_unsigned_plugins=False，已拒绝加载"
+            ),
+        )
+
+    last_install_error = str(getattr(installed_plugin, "last_install_error", "") or "").strip()
+    if last_install_error:
+        return _InstalledPluginAuthorization(
+            allowed=False,
+            state=FEATURE_STATE_FAILED,
+            last_error=f"PLUGIN_INSTALL_FAILED: {last_install_error}",
+            log_level="warn",
+            log_message=(
+                f"installed 插件 {plugin_key} 的 installed_plugin.last_install_error 非空，"
+                "已拒绝加载"
+            ),
+        )
+
+    return _InstalledPluginAuthorization(allowed=True)
+
+
+async def _authorize_installed_plugin(
+    db: Any,
+    plugin_key: str,
+    *,
+    redis: Any | None = None,
+    account_id: int | None = None,
+) -> _InstalledPluginAuthorization:
     """统一判断 installed 插件是否允许被 worker 加载。
 
     第三方插件目录可能来自 zip、Git 远程仓库、历史本地残留或手工拷贝。
@@ -519,8 +612,9 @@ async def _authorize_installed_plugin(db: Any, plugin_key: str) -> _InstalledPlu
         await db.execute(select(RemotePlugin).where(RemotePlugin.name == plugin_key))
     ).scalar_one_or_none()
 
+    legacy = _InstalledPluginAuthorization(allowed=True)
     if plugin_install is None and remote_plugin is None:
-        return _InstalledPluginAuthorization(
+        legacy = _InstalledPluginAuthorization(
             allowed=False,
             state=FEATURE_STATE_FAILED,
             last_error="PLUGIN_LOAD_ORPHAN: orphan plugin (no install record)",
@@ -530,39 +624,39 @@ async def _authorize_installed_plugin(db: Any, plugin_key: str) -> _InstalledPlu
                 "或 RemotePlugin 安装记录，已拒绝加载"
             ),
         )
-
-    if plugin_install is not None:
+    elif plugin_install is not None:
         if not bool(getattr(plugin_install, "enabled", False)):
-            return _InstalledPluginAuthorization(
+            legacy = _InstalledPluginAuthorization(
                 allowed=False,
                 state=FEATURE_STATE_DISABLED,
                 last_error="PLUGIN_DISABLED: PluginInstall.enabled=False",
                 log_level="info",
                 log_message=f"installed 插件 {plugin_key} 的 PluginInstall.enabled=False，跳过加载",
             )
-        signature_ok = getattr(plugin_install, "signature_ok", None)
-        if signature_ok is False:
-            return _InstalledPluginAuthorization(
-                allowed=False,
-                state=FEATURE_STATE_FAILED,
-                last_error="PLUGIN_SIGNATURE_FAILED: PluginInstall.signature_ok=False",
-                log_level="warn",
-                log_message=f"installed 插件 {plugin_key} 签名校验失败，已拒绝加载",
-            )
-        if signature_ok is None and not bool(app_settings.plugin_allow_legacy_unsigned_plugins):
-            return _InstalledPluginAuthorization(
-                allowed=False,
-                state=FEATURE_STATE_FAILED,
-                last_error="PLUGIN_SIGNATURE_UNKNOWN: legacy unsigned plugin is not allowed",
-                log_level="warn",
-                log_message=(
-                    f"installed 插件 {plugin_key} 是历史未签名插件，"
-                    "且 plugin_allow_legacy_unsigned_plugins=False，已拒绝加载"
-                ),
-            )
+        else:
+            signature_ok = getattr(plugin_install, "signature_ok", None)
+            if signature_ok is False:
+                legacy = _InstalledPluginAuthorization(
+                    allowed=False,
+                    state=FEATURE_STATE_FAILED,
+                    last_error="PLUGIN_SIGNATURE_FAILED: PluginInstall.signature_ok=False",
+                    log_level="warn",
+                    log_message=f"installed 插件 {plugin_key} 签名校验失败，已拒绝加载",
+                )
+            elif signature_ok is None and not bool(app_settings.plugin_allow_legacy_unsigned_plugins):
+                legacy = _InstalledPluginAuthorization(
+                    allowed=False,
+                    state=FEATURE_STATE_FAILED,
+                    last_error="PLUGIN_SIGNATURE_UNKNOWN: legacy unsigned plugin is not allowed",
+                    log_level="warn",
+                    log_message=(
+                        f"installed 插件 {plugin_key} 是历史未签名插件，"
+                        "且 plugin_allow_legacy_unsigned_plugins=False，已拒绝加载"
+                    ),
+                )
 
-    if remote_plugin is not None and not bool(getattr(remote_plugin, "enabled", False)):
-        return _InstalledPluginAuthorization(
+    if legacy.allowed and remote_plugin is not None and not bool(getattr(remote_plugin, "enabled", False)):
+        legacy = _InstalledPluginAuthorization(
             allowed=False,
             state=FEATURE_STATE_DISABLED,
             last_error="PLUGIN_DISABLED: RemotePlugin.enabled=False",
@@ -570,7 +664,32 @@ async def _authorize_installed_plugin(db: Any, plugin_key: str) -> _InstalledPlu
             log_message=f"installed 插件 {plugin_key} 的 RemotePlugin.enabled=False，跳过加载",
         )
 
-    return _InstalledPluginAuthorization(allowed=True)
+    new = await _authorize_via_installed_plugin(db, plugin_key)
+    legacy_decision = (legacy.allowed, legacy.state)
+    new_decision = (new.allowed, new.state)
+    if legacy_decision != new_decision:
+        log.warning(
+            "authorize mismatch plugin=%s legacy=%s new=%s",
+            plugin_key,
+            legacy_decision,
+            new_decision,
+        )
+        if redis is not None:
+            await _log(
+                redis,
+                account_id,
+                "warn",
+                (
+                    f"authorize mismatch plugin={plugin_key} "
+                    f"legacy={legacy_decision} new={new_decision}"
+                ),
+                source="system",
+                plugin_key=plugin_key,
+                legacy={"allowed": legacy.allowed, "state": legacy.state},
+                new={"allowed": new.allowed, "state": new.state},
+            )
+
+    return legacy
 
 
 async def _write_account_feature_load_state(
@@ -988,7 +1107,12 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         cls = get_plugin(af.feature_key)
     if cls is None:
         if _installed_plugin_exists(af.feature_key):
-            auth = await _authorize_installed_plugin(db, af.feature_key)
+            auth = await _authorize_installed_plugin(
+                db,
+                af.feature_key,
+                redis=redis,
+                account_id=state.account_id,
+            )
             if not auth.allowed:
                 await _deny_installed_plugin_load(
                     db,
@@ -1020,7 +1144,12 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
     # ── 安全：installed 插件统一授权检查 ──
     plugin_source = getattr(cls, "_source", "builtin")
     if plugin_source == "installed":
-        auth = await _authorize_installed_plugin(db, af.feature_key)
+        auth = await _authorize_installed_plugin(
+            db,
+            af.feature_key,
+            redis=redis,
+            account_id=state.account_id,
+        )
         if not auth.allowed:
             await _deny_installed_plugin_load(
                 db,
@@ -1333,7 +1462,12 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
             plugin_source = getattr(cls, "_source", "builtin") if cls is not None else "builtin"
             auth_denied: _InstalledPluginAuthorization | None = None
             if plugin_source == "installed":
-                auth = await _authorize_installed_plugin(db, fkey)
+                auth = await _authorize_installed_plugin(
+                    db,
+                    fkey,
+                    redis=redis,
+                    account_id=account_id,
+                )
                 if not auth.allowed:
                     auth_denied = auth
 

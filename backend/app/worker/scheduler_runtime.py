@@ -380,6 +380,8 @@ class SchedulerRuleExecutor:
         provider_dtos = {int(p.id): LLMProviderDTO.from_orm_row(p) for p in provider_rows}
         provider_dtos[dto.id] = dto
         fallback_id = _to_positive_int(action.get("fallback_provider_id")) or None
+        # TODO(interactive-bot): 上游交互 Bot 调度触发时传入真实 trigger account id。
+        triggered_by_account_id = _to_positive_int(action.get("triggered_by_account_id")) or None
 
         try:
             result, _, _ = await invoke_ai_runtime(
@@ -391,6 +393,7 @@ class SchedulerRuleExecutor:
                 max_tokens=max_tokens,
                 fallback_provider_id=fallback_id,
                 account_id=ctx.account_id,
+                triggered_by_account_id=triggered_by_account_id,
                 source="scheduler",
                 matched_tag="scheduler",
             )

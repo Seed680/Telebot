@@ -52,6 +52,7 @@ class UsageRecord:
     """单次 LLM 调用的 usage 记录。"""
     provider_id: int | None = None
     account_id: int | None = None
+    triggered_by_account_id: int | None = None
     provider_name: str | None = None
     model: str | None = None
     input_tokens: int = 0
@@ -191,6 +192,7 @@ async def call_with_fallback(
     log_prompt_preview: bool = False,  # 设为 True 时只记录前 100 字符
     client_factory: Callable[..., Any | Awaitable[Any]] | None = None,
     account_id: int | None = None,
+    triggered_by_account_id: int | None = None,
     source: str | None = None,
     # 调试
     _debug: bool = False,
@@ -231,6 +233,7 @@ async def call_with_fallback(
         usage_record = UsageRecord(
             provider_id=all_providers[0].id if all_providers else None,
             account_id=account_id,
+            triggered_by_account_id=triggered_by_account_id,
             provider_name=all_providers[0].name if all_providers else None,
             model=override_model or (all_providers[0].default_model if all_providers else None),
             success=False,
@@ -287,6 +290,7 @@ async def call_with_fallback(
             usage_record = UsageRecord(
                 provider_id=provider_dto.id,
                 account_id=account_id,
+                triggered_by_account_id=triggered_by_account_id,
                 provider_name=provider_dto.name,
                 model=result.model,
                 input_tokens=result.input_tokens,
@@ -326,6 +330,7 @@ async def call_with_fallback(
                 usage_record = UsageRecord(
                     provider_id=provider_dto.id,
                     account_id=account_id,
+                    triggered_by_account_id=triggered_by_account_id,
                     provider_name=provider_dto.name,
                     model=override_model or provider_dto.default_model,
                     success=False,

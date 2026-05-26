@@ -1,0 +1,35 @@
+# TelePilot 模块速查表
+
+- 路线默认值：0.x 走 Route A，受信/签名模块同进程运行。
+- 产品文案统一叫“模块”，代码契约仍是 `Plugin` / `Manifest` / `PluginContext`。
+- 最小目录：`__init__.py`、`manifest.py`、`plugin.py`。
+- `__init__.py` 导出 `PLUGIN_CLASS` 和 `MANIFEST`。
+- `Manifest.key` 要和模块类 `key` 一致。
+- `permissions` 不写就不会注入对应能力。
+- `ctx.client` 是主运行入口；远程模块拿到的是受限 `SandboxClient`。
+- `ctx.http` 需要 `external_http` + `allowed_hosts`。
+- `ctx.ai` 需要 `ai_text`，细节见 `docs/PLUGIN-AI.md`。
+- `command` 只保存裸指令名，不保存前缀。
+- 帮助文案里用 `{prefix}`，不要硬编码 `,`。
+- `owner_only=False` 只开放 `on_message`，不开放普通用户管理指令。
+- `incoming` 和 `outgoing` 是唯一的消息方向值。
+- `on_command(ctx, cmd, args, event) -> bool`，返回 `True` 表示接管。
+- `on_message` 里别直接假设 `event.outgoing` 一定存在，先 `getattr`。
+- `on_interaction` 用于交互 Bot，按 `entry_key` 和 `payload["event"]["type"]` 分流。
+- 常见事件：`payment_confirmed`、`keyword`、`message`、`session_close`。
+- 常见动作：`send_message`、`send_photo`、`send_file`、`end_session`。
+- 长表单页要把“使用说明 → 功能总开关 → 配置”拆成三张卡。
+- 有保存字段的页面要放顶部冻结“配置操作”条。
+- 规则驱动页用 `rules`，单配置页用 `single`，平台能力用 `platform`。
+- 旧 `schema` 只保留给老模块兼容。
+- 远程模块要有 `plugin.json`、`manifest.py`、`plugin.py`、`__init__.py`。
+- `plugin.json` 只做静态安装元数据，不执行 Python。
+- 远程模块安装后还要看 `manifest.py` 的真实 `MANIFEST`。
+- 远程模块的 `version`、`category`、`interaction_entries` 要前后一致。
+- 抢答/竞猜/抽奖要用锁和二次检查，避免重复发奖。
+- 超时任务、禁用、热重载、卸载都要清理状态。
+- 外部请求必须有 timeout。
+- 日志里不要放 token、session、完整路径或完整隐私消息。
+- 普通指令只由当前账号 outgoing 触发，不能直接让群成员触发管理命令。
+- 需要更多细节时，分别看概览、API、HTTP、安全和远程模块文档。
+
