@@ -25,6 +25,7 @@
 - ⚠️ 升级提示：手工拷贝到 `plugins/installed/<key>/` 但未通过安装接口的目录现在被识别为"孤立目录"，不再出现在模块中心，也无法启用。请改用模块仓库安装或 zip 安装。
 - 插件 loader 授权切换为单读 `installed_plugin` 表，不再依赖 `PluginInstall` / `RemotePlugin` 运行时状态。
 - `PluginInstall` 与 `RemotePlugin` 转为只读兼容快照，zip、Git、仓库和本地导入安装、更新、启停、卸载统一写入 `InstalledPlugin`；迁移 `0029` 会从老表回填缺失安装记录。
+- ⚠️ 迁移提示：`0029` 的 downgrade 是 no-op；回退到 `0028` 后，`PluginInstall` / `RemotePlugin` 老表只保留 `0029` 之前的存量数据，升级后写入 `InstalledPlugin` 的新安装状态不会被逆向回填。
 - 模块中心 `FeatureInfo` 暴露 `lint_warnings`，前端模块卡片可折叠展示 lint 提醒。
 - `ctx.ai.complete()` 移除 `provider_hint` 兼容入口，并对 `tag` / `tags` 别名发出 `DeprecationWarning`；新模块应使用 `provider_tag`。
 - 插件 HTTP facade 的策略错误与响应过大错误会带上 `plugin_key`，便于从日志定位触发插件。
