@@ -381,6 +381,7 @@ export function ChatGPTImageConfigPage() {
       qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
       qc.invalidateQueries({ queryKey: ["account", aid, "features", "chatgpt_image", "config"] });
       qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: ["message-templates", "catalog", aid] });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });

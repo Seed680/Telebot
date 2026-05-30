@@ -579,6 +579,8 @@ export function MessageTemplateLabPage() {
     queryKey: ["message-templates", "catalog", selectedAid],
     queryFn: () => getMessageTemplateCatalog(selectedAid!),
     enabled: selectedAid !== null,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: "always",
   });
 
   const usersQ = useQuery({
@@ -739,6 +741,7 @@ export function MessageTemplateLabPage() {
     ));
     setRenderResult(null);
     setTestResult(null);
+    setTestError(null);
   }, [selectedTemplate]);
 
   const changeAccount = (aid: number) => {

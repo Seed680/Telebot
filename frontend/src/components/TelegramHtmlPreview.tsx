@@ -14,6 +14,11 @@ function sanitizeTelegramHtml(value: string): string {
   let html = escapeHtml(value);
 
   html = html.replace(
+    /&lt;code\s+class=(?:&quot;|&#39;)(language-[^&<>\s]+)(?:&quot;|&#39;)&gt;/gi,
+    (_match, className: string) => `<code class="${className}">`,
+  );
+
+  html = html.replace(
     /&lt;(\/?)(b|strong|i|em|u|s|del|strike|code|pre)&gt;/gi,
     "<$1$2>",
   );

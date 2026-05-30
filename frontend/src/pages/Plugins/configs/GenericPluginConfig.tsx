@@ -165,6 +165,7 @@ export function GenericPluginConfigPage() {
       qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
       qc.invalidateQueries({ queryKey: ["plugin", "global", featureKey] });
       qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: ["message-templates", "catalog"] });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });

@@ -217,6 +217,7 @@ export function CodexImageConfigPage() {
       setDirty(false);
       qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
       qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: ["message-templates", "catalog", aid] });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
