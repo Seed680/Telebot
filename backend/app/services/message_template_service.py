@@ -501,6 +501,13 @@ def render_template(payload: MessageTemplateRenderRequest) -> MessageTemplateRen
     )
 
 
+_TARGET_NOT_ALLOWED_MESSAGE = (
+    "只能发送到当前账号已授权用户与 Bot 建立过的私聊。"
+    "请到账号详情 → Bot 联动 → 授权用户添加并启用目标 Telegram 用户 ID，"
+    "再让该用户私聊这个 Bot 发送 /start，系统记录 last_chat_id 后回到这里选择该用户或填写同一个 ID。"
+)
+
+
 async def _assert_authorized_private_target(
     db: AsyncSession,
     account_id: int,
@@ -509,7 +516,7 @@ async def _assert_authorized_private_target(
     if int(target_chat_id) <= 0:
         raise _bad(
             "MESSAGE_TEMPLATE_TARGET_NOT_ALLOWED",
-            "只能发送到当前账号已授权用户与 Bot 建立过的私聊。",
+            _TARGET_NOT_ALLOWED_MESSAGE,
             status.HTTP_403_FORBIDDEN,
         )
     users = await account_bot_service.list_bot_users(db, account_id)
@@ -524,7 +531,7 @@ async def _assert_authorized_private_target(
             return
     raise _bad(
         "MESSAGE_TEMPLATE_TARGET_NOT_ALLOWED",
-        "只能发送到当前账号已授权用户与 Bot 建立过的私聊。",
+        _TARGET_NOT_ALLOWED_MESSAGE,
         status.HTTP_403_FORBIDDEN,
     )
 

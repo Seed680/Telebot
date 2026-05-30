@@ -538,6 +538,7 @@ export function MessageTemplateLabPage() {
   const [openGroupUids, setOpenGroupUids] = useState<Set<string>>(() => new Set());
   const [renderResult, setRenderResult] = useState<Awaited<ReturnType<typeof renderMessageTemplate>> | null>(null);
   const [testResult, setTestResult] = useState<Awaited<ReturnType<typeof testSendMessageTemplate>> | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
   const renderRequestSeq = useRef(0);
   const testRequestSeq = useRef(0);
   const invalidatePendingRequests = () => {
@@ -631,6 +632,7 @@ export function MessageTemplateLabPage() {
       }
       setRenderResult(result);
       setTestResult(null);
+      setTestError(null);
       if (result.validation?.warnings?.length) {
         toast.warning(result.validation.warnings[0]);
       } else {
@@ -646,21 +648,27 @@ export function MessageTemplateLabPage() {
   const testMut = useMutation({
     mutationFn: testSendMessageTemplate,
     onMutate: () => {
+      setTestError(null);
       const requestSeq = ++testRequestSeq.current;
       return { requestSeq };
     },
     onSuccess: (result, _variables, context) => {
       if (context?.requestSeq !== testRequestSeq.current) return;
       if (result.ok === false) {
-        toast.error(result.message || "测试发送失败");
+        const message = result.message || "测试发送失败";
+        setTestError(message);
+        toast.error(message);
         return;
       }
       setTestResult(result);
+      setTestError(null);
       toast.success(result.message || "私聊测试消息已发送");
     },
     onError: (err, _variables, context) => {
       if (context?.requestSeq !== testRequestSeq.current) return;
-      toast.error(getErrMsg(err));
+      const message = getErrMsg(err);
+      setTestError(message);
+      toast.error(message);
     },
   });
 
@@ -871,7 +879,9 @@ export function MessageTemplateLabPage() {
     }
     const chatId = parsePrivateChatId(targetChatId);
     if (!chatId) {
-      toast.error("target_chat_id 仅支持私聊正整数");
+      const message = "target_chat_id 仅支持授权用户的 Telegram 数字 ID，不能填群 ID、频道 ID、手机号或 username。";
+      setTestError(message);
+      toast.error(message);
       return;
     }
     const parsed = parseVariablesJson(variablesText);
@@ -918,7 +928,7 @@ export function MessageTemplateLabPage() {
       <StatusSummaryPanel
         icon={FlaskConical}
         title="消息模板实验室"
-        description="按账号拉取后端 catalog，编辑变量后由后端 render，并只向私聊 target_chat_id 发送测试消息。"
+        description="按账号拉取后端 catalog，编辑变量后由后端 render。测试发送只允许发给当前账号已授权且私聊过 Bot 的用户。"
         signals={(
           <>
             <SignalPill tone="primary" label="模板" value={catalog.templates.length} />
@@ -1361,10 +1371,30 @@ export function MessageTemplateLabPage() {
               <SectionHeader
                 icon={Send}
                 title="测试发送"
-                description="仅发私聊测试，target_chat_id 必须是正整数。"
+                description="测试发送只发当前账号的授权私聊用户。先在 Bot 联动里添加 Telegram 用户 ID，再让该用户私聊 Bot 发送 /start。"
               />
             </CardHeader>
             <CardContent className="space-y-3">
+              <div className="space-y-2 rounded-lg border border-primary/20 bg-primary/5 px-3 py-3 text-sm">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                  <div className="min-w-0 space-y-1">
+                    <div className="font-medium text-foreground">配置 Bot Token 只是具备发送能力，还需要指定安全测试对象。</div>
+                    <div className="text-muted-foreground">
+                      去当前账号的 Bot 联动页添加并启用目标 Telegram 用户 ID；然后让这个用户私聊该 Bot 发送 /start。系统记录到 last_chat_id 后，这里会出现可选用户。
+                    </div>
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={!selectedAid}
+                  onClick={() => selectedAid && nav(`/accounts/${selectedAid}?tab=bot`)}
+                >
+                  <UserRound className="mr-1 h-4 w-4" /> 去 Bot 联动授权用户
+                </Button>
+              </div>
               {privateUsers.length > 0 ? (
                 <div className="space-y-1.5">
                   <Label htmlFor="bot-user-select">已记录私聊</Label>
@@ -1388,7 +1418,9 @@ export function MessageTemplateLabPage() {
               ) : (
                 <div className="flex items-start gap-2 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
                   <UserRound className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>账号 Bot 暂无已记录私聊用户，可手动输入 target_chat_id。</span>
+                  <span>
+                    还没有可直接选择的私聊用户。请先去 Bot 联动添加授权用户，并让该用户私聊 Bot 发送 /start；完成后刷新这里即可选择。
+                  </span>
                 </div>
               )}
 
@@ -1401,6 +1433,9 @@ export function MessageTemplateLabPage() {
                   value={targetChatId}
                   onChange={(event) => setTargetChatId(event.target.value.replace(/[^\d]/g, ""))}
                 />
+                <p className="text-xs leading-5 text-muted-foreground">
+                  这里填授权用户的 Telegram 用户 ID。群 ID、频道 ID、手机号、username 都不会通过测试发送校验。
+                </p>
               </div>
 
               <Button
@@ -1422,6 +1457,13 @@ export function MessageTemplateLabPage() {
                 )}
                 发送私聊测试
               </Button>
+
+              {testError ? (
+                <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span className="break-words">{testError}</span>
+                </div>
+              ) : null}
 
               {testResult ? (
                 <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-300">
