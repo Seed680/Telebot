@@ -33,6 +33,7 @@ from ..db.models.account_bot import (
     AccountBotUser,
 )
 from ..db.models.system import SystemSetting
+from ..feature_registry import BUILTIN_FEATURES
 from ..schemas.account_bot import (
     AccountBotConfigResponse,
     AccountBotConfigUpdate,
@@ -40,7 +41,6 @@ from ..schemas.account_bot import (
     AccountBotUserCreate,
     AccountBotUserUpdate,
 )
-from ..feature_registry import BUILTIN_FEATURES
 from ..settings import settings
 
 log = logging.getLogger(__name__)
