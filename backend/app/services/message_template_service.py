@@ -293,7 +293,7 @@ def _system_catalog_items(config: dict[str, Any]) -> list[MessageTemplateCatalog
             feature_key=None,
             field_key="transfer_notice_template",
             title="转账通知模板",
-            description="模拟转账通知 Bot 发出的到账消息模板。",
+            description="转账结果通知 Bot 发出的到账消息模板，默认带 language-转账成功 代码块标识。",
             template=transfer_template,
             sample_data=_sample_data_for_template(transfer_template, explicit=transfer_sample),
             parse_mode=_DEFAULT_PARSE_MODE,

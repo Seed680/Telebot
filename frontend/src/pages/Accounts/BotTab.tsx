@@ -123,12 +123,11 @@ const DEFAULT_INTERACTION_MODULE_START_TEXT = "正在启动互动模块...";
 const DEFAULT_MATH10_START_KEYWORDS = "发十以内算数\n十以内算数\n开算数题";
 const RULE_CONTROLLED_MODULE_CONFIG_KEYS = new Set(["prize", "timeout", "valid_seconds"]);
 const DEFAULT_TRANSFER_NOTICE_TEMPLATE = [
-  "转账成功",
-  "付款人：{payer_name}",
+  '<pre><code class="language-转账成功">付款人：{payer_name}',
   "{payer_user_id_line}",
   "收款人：{receiver_name}",
   "金额：{amount}",
-  "{receiver_user_id_line}",
+  "{receiver_user_id_line}</code></pre>",
 ].join("\n");
 
 const DEFAULT_INTERACTION_BOT: AccountBotInteractionConfig = {
@@ -2540,7 +2539,7 @@ export function BotTab({ aid }: { aid: number }) {
             </div>
 
           <div className="rounded-md bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
-            群里回复任意消息发送 <code>+123</code> 后，若已填写转账结果通知 Bot Token，会生成：转账成功 / 发送者 射出 123 / 被回复者 接收 123。
+            群里回复任意消息发送 <code>+123</code> 后，若已填写转账结果通知 Bot Token，会生成带 <code>language-转账成功</code> 标识的 HTML 代码块。
             没有测试用的转账通知结果 Bot 的 Token 时，交互 Bot 只监听群里真实出现的转账结果通知。
           </div>
             <div className="flex justify-end">

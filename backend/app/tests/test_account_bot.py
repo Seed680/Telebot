@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.api import account_bots
+from app.account_bot_defaults import DEFAULT_TRANSFER_NOTICE_TEMPLATE, LEGACY_TRANSFER_NOTICE_TEMPLATE
 from app.db.models.account import Account
 from app.db.models.account_bot import AccountBot
 from app.db.models.log import RuntimeLog
@@ -227,6 +228,15 @@ def test_account_bot_transfer_notice_config_normalizes_values() -> None:
     assert cfg["rules"][0]["id"] == "legacy-default"
     assert cfg["rules"][0]["chat_ids"] == [-100123, -100999]
     assert cfg["rules"][0]["trigger_texts"] == ["转账成功", "交易成功"]
+
+
+def test_account_bot_transfer_notice_config_upgrades_legacy_default_template() -> None:
+    cfg = account_bot_service.normalize_transfer_notice_config(
+        {"transfer_notice_template": LEGACY_TRANSFER_NOTICE_TEMPLATE}
+    )
+
+    assert cfg["transfer_notice_template"] == DEFAULT_TRANSFER_NOTICE_TEMPLATE
+    assert "language-转账成功" in cfg["transfer_notice_template"]
 
 
 @pytest.mark.asyncio
@@ -752,7 +762,14 @@ def test_account_bot_transfer_notice_template_renders_parseable_notice() -> None
         receiver_user_id=9988,
     )
 
-    assert notice == "转账成功\n付款人：付款方\n付款人ID：1122\n收款人：收款方\n金额：88\n收款人ID：9988"
+    assert notice == (
+        '<pre><code class="language-转账成功">付款人：付款方\n'
+        "付款人ID：1122\n"
+        "收款人：收款方\n"
+        "金额：88\n"
+        "收款人ID：9988</code></pre>"
+    )
+    assert "language-转账成功" in notice
     assert account_bot_runtime._parse_transfer_notice(notice) == {
         "payer_name": "付款方",
         "payer_user_id": 1122,
@@ -825,7 +842,11 @@ async def test_transfer_command_template_render_failure_falls_back_and_logs(
     assert send.await_args.args[:3] == (
         "abot-token",
         -100123,
-        "转账成功\n付款人：PayoutUser\n付款人ID：999\n收款人：Winner\n金额：123\n收款人ID：111",
+        '<pre><code class="language-转账成功">付款人：PayoutUser\n'
+        "付款人ID：999\n"
+        "收款人：Winner\n"
+        "金额：123\n"
+        "收款人ID：111</code></pre>",
     )
     assert runtime_log.await_count == 1
     assert runtime_log.await_args.args[1:] == (

@@ -19,6 +19,7 @@ from ..account_bot_defaults import (
     DEFAULT_INTERACTION_DISABLED_MESSAGE,
     DEFAULT_INTERACTION_RESPONSE_TEMPLATE,
     DEFAULT_TRANSFER_NOTICE_TEMPLATE,
+    LEGACY_TRANSFER_NOTICE_TEMPLATE,
 )
 from ..crypto import decrypt_str, encrypt_str
 from ..db.models.account import Account
@@ -198,6 +199,13 @@ def default_transfer_notice_config() -> dict[str, Any]:
     }
 
 
+def normalize_transfer_notice_template(value: Any) -> str:
+    template = str(value or "").strip()
+    if not template or template == LEGACY_TRANSFER_NOTICE_TEMPLATE:
+        return DEFAULT_TRANSFER_NOTICE_TEMPLATE
+    return template[:1000]
+
+
 def normalize_transfer_notice_config(raw: Any) -> dict[str, Any]:
     base = default_transfer_notice_config()
     if isinstance(raw, dict):
@@ -293,8 +301,7 @@ def normalize_transfer_notice_config(raw: Any) -> dict[str, Any]:
     base["receiver_text"] = receiver or None
     template = str(base.get("response_template") or "").strip()
     base["response_template"] = template or default_transfer_notice_config()["response_template"]
-    notice_template = str(base.get("transfer_notice_template") or "").strip()
-    base["transfer_notice_template"] = (notice_template or DEFAULT_TRANSFER_NOTICE_TEMPLATE)[:1000]
+    base["transfer_notice_template"] = normalize_transfer_notice_template(base.get("transfer_notice_template"))
     rules = normalize_interaction_rules(base.get("rules"))
     if not rules:
         rules = [
