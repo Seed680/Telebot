@@ -21,15 +21,6 @@ for import_root in (ROOT, BACKEND_ROOT):
 
 from app.worker.plugins.manifest import Manifest  # noqa: E402
 
-
-TARGET_PLUGIN_KEYS = {
-    "guess_number",
-    "poetry_blank",
-    "dice_grid_hunt",
-    "lottery_plus",
-    "redpack-byRBQ",
-    "pt_promote",
-}
 REQUIRED_FILES = {"plugin.json", "manifest.py", "plugin.py", "__init__.py"}
 
 
@@ -69,6 +60,27 @@ def _load_plugin_json(plugin_dir: Path) -> dict[str, Any]:
     return data
 
 
+def _installed_interaction_plugin_keys() -> list[str]:
+    keys: set[str] = set()
+    for plugin_dir in sorted(path for path in INSTALLED_ROOT.iterdir() if path.is_dir()):
+        plugin_json = plugin_dir / "plugin.json"
+        manifest_py = plugin_dir / "manifest.py"
+        has_interaction_entries = False
+        if plugin_json.is_file():
+            metadata = _load_plugin_json(plugin_dir)
+            entries = metadata.get("interaction_entries")
+            has_interaction_entries = isinstance(entries, list) and any(isinstance(item, dict) for item in entries)
+        if not has_interaction_entries and manifest_py.is_file():
+            manifest_module = _load_installed_module(plugin_dir.name, "manifest.py")
+            manifest = getattr(manifest_module, "MANIFEST", None)
+            has_interaction_entries = isinstance(manifest, Manifest) and any(
+                isinstance(item, dict) for item in manifest.interaction_entries
+            )
+        if has_interaction_entries:
+            keys.add(plugin_dir.name)
+    return sorted(keys)
+
+
 def _validate_plugin(plugin_key: str) -> None:
     plugin_dir = INSTALLED_ROOT / plugin_key
     missing = sorted(file for file in REQUIRED_FILES if not (plugin_dir / file).is_file())
@@ -100,12 +112,11 @@ def main() -> int:
     if not INSTALLED_ROOT.is_dir():
         raise AssertionError(f"已安装插件目录不存在: {INSTALLED_ROOT}")
 
-    present = {path.name for path in INSTALLED_ROOT.iterdir() if path.is_dir()}
-    missing_targets = sorted(TARGET_PLUGIN_KEYS - present)
-    if missing_targets:
-        raise AssertionError(f"目标插件目录不存在: {', '.join(missing_targets)}")
+    plugin_keys = _installed_interaction_plugin_keys()
+    if not plugin_keys:
+        raise AssertionError("未发现声明 interaction_entries 的已安装插件")
 
-    for plugin_key in sorted(TARGET_PLUGIN_KEYS):
+    for plugin_key in plugin_keys:
         _validate_plugin(plugin_key)
     return 0
 

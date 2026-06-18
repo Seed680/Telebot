@@ -17,6 +17,18 @@ from app.worker.plugins.base import PluginContext
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 INSTALLED_ROOT = PROJECT_ROOT / "plugins" / "installed"
+VALIDATOR_PATH = PROJECT_ROOT / "scripts" / "validate-installed-interaction-plugins.py"
+
+
+def _load_validator_module() -> ModuleType:
+    module_name = "telepilot_validate_installed_interaction_plugins"
+    spec = importlib.util.spec_from_file_location(module_name, VALIDATOR_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法加载脚本: {VALIDATOR_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load_installed_module(plugin_key: str, filename: str) -> ModuleType:
@@ -50,6 +62,19 @@ class _ReplyRecorder:
 
     async def reply(self, text: str) -> None:
         self.replies.append(text)
+
+
+def test_installed_interaction_validator_discovers_only_nonempty_interaction_entries() -> None:
+    validate_installed_interactions = _load_validator_module()
+
+    assert validate_installed_interactions._installed_interaction_plugin_keys() == [
+        "dice_grid_hunt",
+        "guess_number",
+        "lottery_plus",
+        "poetry_blank",
+        "pt_promote",
+        "redpack-byRBQ",
+    ]
 
 
 @pytest.mark.asyncio

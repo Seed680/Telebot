@@ -14,6 +14,14 @@
 
 ## [Unreleased]
 
+## [0.29.1] — 2026-06-18 · patch · 交互插件校验自动发现
+
+### Changed
+- 已安装互动插件校验脚本改为自动发现所有声明了非空 `interaction_entries` 的 installed 插件，不再固定只检查当前 6 个样本，避免后续安装 blackjack、dice_battle、idiom_chain 等互动插件时漏过契约漂移。
+
+### Tests
+- 新增回归测试覆盖 installed 交互插件校验脚本只纳入非空交互入口插件，避免工具/自动化插件因 `interaction_entries=[]` 被误判为互动插件。
+
 ## [0.29.0] — 2026-06-18 · minor · 交互插件统一调用与结果隔离
 
 ### Added
