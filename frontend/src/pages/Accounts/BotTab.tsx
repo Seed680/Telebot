@@ -1468,7 +1468,7 @@ function InteractionRuleEditor({
   );
 }
 
-export function BotTab({ aid }: { aid: number }) {
+export function BotTab({ aid, mode = "management" }: { aid: number; mode?: "management" | "interaction" }) {
   const qc = useQueryClient();
   const [enabled, setEnabled] = useState(false);
   const [token, setToken] = useState("");
@@ -1864,13 +1864,25 @@ export function BotTab({ aid }: { aid: number }) {
   ).length;
   const interactionRuntimeTone = interactionRunning ? "success" : transferEnabled ? "warn" : "neutral";
 
-  return (
+  const managementStatus = (
+    <div className="flex flex-wrap gap-2">
+      <SignalPill tone={bot.enabled ? "success" : "warn"} label="管理 Bot" value={bot.enabled ? "已启用" : "未启用"} />
+      <SignalPill tone={bot?.has_token ? "success" : "neutral"} label="Token" value={bot?.has_token ? "已配置" : "未配置"} />
+      <SignalPill tone={users.length > 0 ? "primary" : "neutral"} label="授权用户" value={`${users.length} 人`} />
+    </div>
+  );
+
+  const interactionStatus = (
+    <div className="flex flex-wrap gap-2">
+      <SignalPill tone={interactionReady ? "primary" : "neutral"} label="互动规则" value={interactionReady ? "可执行" : "待配置"} />
+      <SignalPill tone={interactionRunning ? "success" : "neutral"} label="互动运行态" value={interactionRunning ? "运行中" : "未运行"} />
+      <SignalPill tone={activeRuleCount > 0 ? "primary" : "neutral"} label="启用规则" value={`${activeRuleCount}/${interactionRules.length}`} />
+    </div>
+  );
+
+  const managementContent = (
     <div className="space-y-6">
-      <div className="flex flex-wrap gap-2">
-        <SignalPill tone={bot.enabled ? "success" : "warn"} label="管理 Bot" value={bot.enabled ? "已启用" : "未启用"} />
-        <SignalPill tone={interactionReady ? "primary" : "neutral"} label="互动规则" value={interactionReady ? "可执行" : "待配置"} />
-        <SignalPill tone={interactionRunning ? "success" : "neutral"} label="互动运行态" value={interactionRunning ? "运行中" : "未运行"} />
-      </div>
+      {managementStatus}
       <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
         <Card>
           <CardHeader>
@@ -2055,12 +2067,16 @@ export function BotTab({ aid }: { aid: number }) {
           </CardContent>
         </Card>
       </div>
+    </div>
+  );
 
+  const interactionContent = (
+    <div className="space-y-6">
+      {interactionStatus}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
-            <Bot className="h-4 w-4" /> 交互 Bot / 转账结果通知 Bot 的娱乐性联动（Beta）
-
+            <Bot className="h-4 w-4" /> 联动交互 Bot
           </CardTitle>
           <CardDescription>
             为了减少娱乐模块的高频率 API 调用会对人形 Bot 产生封号的风险，特有此方案。<br />
@@ -2570,11 +2586,14 @@ export function BotTab({ aid }: { aid: number }) {
           </section>
         </CardContent>
       </Card>
+    </div>
+  );
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Bell className="h-4 w-4" /> 管理 Bot 授权用户
+  const usersContent = (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Bell className="h-4 w-4" /> 管理 Bot 授权用户
           </CardTitle>
           <CardDescription>
             未授权用户默认无响应。授权用户发 /start 后会记录 last_chat_id，用于通知和测试发送。
@@ -2815,6 +2834,16 @@ export function BotTab({ aid }: { aid: number }) {
           </Table>
         </CardContent>
       </Card>
+  );
+
+  if (mode === "interaction") {
+    return interactionContent;
+  }
+
+  return (
+    <div className="space-y-6">
+      {managementContent}
+      {usersContent}
     </div>
   );
 }

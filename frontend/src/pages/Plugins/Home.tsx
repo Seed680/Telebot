@@ -283,9 +283,9 @@ export function PluginsHome() {
             <Button
               size="sm"
               variant="outline"
-              onClick={() => nav(selectedAid ? `/accounts/${selectedAid}?tab=bot` : "/accounts")}
+              onClick={() => nav(selectedAid ? `/accounts/${selectedAid}?tab=bot-management` : "/accounts")}
             >
-              前往账号 Bot
+              前往管理 Bot
             </Button>
             <Button size="sm" variant="outline" onClick={() => nav("/plugins/manage?tab=plugins")}>
               前往模块安装

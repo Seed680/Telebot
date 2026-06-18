@@ -8,6 +8,7 @@ import {
   Bot,
   ChevronRight,
   Gauge,
+  Gamepad2,
   KeyRound,
   LayoutDashboard,
   Loader2,
@@ -96,7 +97,9 @@ export function AccountDetail() {
   const params = useParams();
   const [searchParams] = useSearchParams();
   const tabParam = searchParams.get("tab") || "overview";
-  const defaultTab = ["overview", "commands", "features", "bot", "rate", "proxy", "ignored"].includes(tabParam)
+  const defaultTab = tabParam === "bot"
+    ? "bot-management"
+    : ["overview", "commands", "features", "bot-management", "interaction-bot", "rate", "proxy", "ignored"].includes(tabParam)
     ? tabParam
     : "overview";
   const aid = Number(params.aid);
@@ -259,8 +262,11 @@ export function AccountDetail() {
             <TabsTrigger value="commands" className="shrink-0 gap-1.5">
               <Terminal className="h-4 w-4" /> 自定义指令
             </TabsTrigger>
-            <TabsTrigger value="bot" className="shrink-0 gap-1.5">
-              <MessageCircle className="h-4 w-4" /> Bot 联动
+            <TabsTrigger value="bot-management" className="shrink-0 gap-1.5">
+              <MessageCircle className="h-4 w-4" /> 管理 Bot
+            </TabsTrigger>
+            <TabsTrigger value="interaction-bot" className="shrink-0 gap-1.5">
+              <Gamepad2 className="h-4 w-4" /> 联动交互 Bot
             </TabsTrigger>
             <TabsTrigger value="rate" className="shrink-0 gap-1.5">
               <Gauge className="h-4 w-4" /> 风控基础
@@ -628,9 +634,14 @@ export function AccountDetail() {
 
         </TabsContent>
 
-        {/* 账号绑定普通 Bot 联动 */}
-        <TabsContent value="bot">
-          <BotTab aid={aid} />
+        {/* 账号绑定管理 Bot */}
+        <TabsContent value="bot-management">
+          <BotTab aid={aid} mode="management" />
+        </TabsContent>
+
+        {/* 联动交互 Bot */}
+        <TabsContent value="interaction-bot">
+          <BotTab aid={aid} mode="interaction" />
         </TabsContent>
 
         {/* 风控基础 */}

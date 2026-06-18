@@ -331,13 +331,13 @@ export function SettingsIndex() {
             onClick={() => {
               const accounts = accountsQ.data ?? [];
               if (accounts.length === 1) {
-                nav(`/accounts/${accounts[0].id}?tab=bot`);
+                nav(`/accounts/${accounts[0].id}?tab=bot-management`);
                 return;
               }
               setQuickBindOpen(true);
             }}
           >
-            <Bot className="mr-1 h-4 w-4" /> 绑定机器人
+            <Bot className="mr-1 h-4 w-4" /> 绑定管理 Bot
           </Button>
         </CardContent>
       </Card>
@@ -347,7 +347,7 @@ export function SettingsIndex() {
           <DialogHeader>
             <DialogTitle>选择要绑定机器人的账号</DialogTitle>
             <DialogDescription>
-              请选择一个账号，进入该账号的 Bot 联动配置页。
+              请选择一个账号，进入该账号的管理 Bot 配置页。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
@@ -374,7 +374,7 @@ export function SettingsIndex() {
               disabled={!quickAid}
               onClick={() => {
                 setQuickBindOpen(false);
-                nav(`/accounts/${quickAid}?tab=bot`);
+                nav(`/accounts/${quickAid}?tab=bot-management`);
               }}
             >
               前往配置

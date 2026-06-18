@@ -1374,7 +1374,7 @@ export function MessageTemplateLabPage() {
               <SectionHeader
                 icon={Send}
                 title="测试发送"
-                description="测试发送只发当前账号的授权私聊用户。先在 Bot 联动里添加 Telegram 用户 ID，再让该用户私聊 Bot 发送 /start。"
+                description="测试发送只发当前账号的授权私聊用户。先在管理 Bot 里添加 Telegram 用户 ID，再让该用户私聊 Bot 发送 /start。"
               />
             </CardHeader>
             <CardContent className="space-y-3">
@@ -1384,7 +1384,7 @@ export function MessageTemplateLabPage() {
                   <div className="min-w-0 space-y-1">
                     <div className="font-medium text-foreground">配置 Bot Token 只是具备发送能力，还需要指定安全测试对象。</div>
                     <div className="text-muted-foreground">
-                      去当前账号的 Bot 联动页添加并启用目标 Telegram 用户 ID；然后让这个用户私聊该 Bot 发送 /start。系统记录到 last_chat_id 后，这里会出现可选用户。
+                      去当前账号的管理 Bot 页添加并启用目标 Telegram 用户 ID；然后让这个用户私聊该 Bot 发送 /start。系统记录到 last_chat_id 后，这里会出现可选用户。
                     </div>
                   </div>
                 </div>
@@ -1393,9 +1393,9 @@ export function MessageTemplateLabPage() {
                   variant="outline"
                   size="sm"
                   disabled={!selectedAid}
-                  onClick={() => selectedAid && nav(`/accounts/${selectedAid}?tab=bot`)}
+                  onClick={() => selectedAid && nav(`/accounts/${selectedAid}?tab=bot-management`)}
                 >
-                  <UserRound className="mr-1 h-4 w-4" /> 去 Bot 联动授权用户
+                  <UserRound className="mr-1 h-4 w-4" /> 去管理 Bot 授权用户
                 </Button>
               </div>
               {privateUsers.length > 0 ? (
@@ -1422,7 +1422,7 @@ export function MessageTemplateLabPage() {
                 <div className="flex items-start gap-2 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
                   <UserRound className="mt-0.5 h-4 w-4 shrink-0" />
                   <span>
-                    还没有可直接选择的私聊用户。请先去 Bot 联动添加授权用户，并让该用户私聊 Bot 发送 /start；完成后刷新这里即可选择。
+                    还没有可直接选择的私聊用户。请先去管理 Bot 添加授权用户，并让该用户私聊 Bot 发送 /start；完成后刷新这里即可选择。
                   </span>
                 </div>
               )}
