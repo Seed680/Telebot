@@ -14,6 +14,12 @@
 
 ## [Unreleased]
 
+## [0.31.4] — 2026-06-25 · patch · CI 与无奖金入口兼容修复
+
+### Fixed
+- 修复 GitHub Actions 干净 checkout 不包含本机 `plugins/installed` 运行时目录时，已安装互动插件契约测试误失败的问题；本机有插件样本时仍会执行完整契约测试。
+- 修复 `pt_promote` 这类无奖金字段的工具型交互入口在缺少本机插件元数据时，旧 `module_prize` 仍可能被保留并显示奖金的问题。
+
 ## [0.31.3] — 2026-06-25 · patch · 交互 Bot 按钮与插件运行修复
 
 ### Added

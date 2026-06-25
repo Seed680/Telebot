@@ -65,6 +65,9 @@ FALLBACK_CHAT_SESSION_MODULE_ENTRIES = {
     ("math10", "start_math10"),
     ("guess_number", "start_game"),
 }
+FALLBACK_NO_PRIZE_MODULE_ENTRIES = {
+    ("pt_promote", "promote_torrent"),
+}
 RULE_CONTROLLED_MODULE_CONFIG_KEYS = {"prize", "timeout", "valid_seconds"}
 DEFAULT_MATH10_START_KEYWORDS = ["发十以内算数", "十以内算数", "开算数题"]
 
@@ -618,6 +621,8 @@ def declared_module_entry_has_field(module_key: str | None, module_action: str |
             return declared
     except Exception:  # noqa: BLE001
         log.debug("读取 installed 模块交互入口字段失败: %s.%s", module_key, module_action, exc_info=True)
+    if field_name == "prize" and (module_key, module_action) in FALLBACK_NO_PRIZE_MODULE_ENTRIES:
+        return False
     return None
 
 

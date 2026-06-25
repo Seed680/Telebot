@@ -18,6 +18,24 @@ from app.worker.plugins.base import PluginContext
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 INSTALLED_ROOT = PROJECT_ROOT / "plugins" / "installed"
 VALIDATOR_PATH = PROJECT_ROOT / "scripts" / "validate-installed-interaction-plugins.py"
+REQUIRED_INSTALLED_PLUGIN_KEYS = (
+    "dice_grid_hunt",
+    "guess_number",
+    "lottery_plus",
+    "poetry_blank",
+    "pt_promote",
+    "redpack-byRBQ",
+)
+
+
+def _installed_plugins_available() -> bool:
+    return INSTALLED_ROOT.is_dir() and all((INSTALLED_ROOT / key / "plugin.py").is_file() for key in REQUIRED_INSTALLED_PLUGIN_KEYS)
+
+
+requires_installed_plugins = pytest.mark.skipif(
+    not _installed_plugins_available(),
+    reason="本机未安装交互插件样本；CI 干净 checkout 不包含 plugins/installed 运行时目录",
+)
 
 
 def _load_validator_module() -> ModuleType:
@@ -65,16 +83,11 @@ class _ReplyRecorder:
 
 
 def test_installed_interaction_validator_discovers_only_nonempty_interaction_entries() -> None:
+    if not INSTALLED_ROOT.is_dir():
+        pytest.skip("本机未安装交互插件样本")
     validate_installed_interactions = _load_validator_module()
 
-    assert validate_installed_interactions._installed_interaction_plugin_keys() == [
-        "dice_grid_hunt",
-        "guess_number",
-        "lottery_plus",
-        "poetry_blank",
-        "pt_promote",
-        "redpack-byRBQ",
-    ]
+    assert validate_installed_interactions._installed_interaction_plugin_keys() == list(REQUIRED_INSTALLED_PLUGIN_KEYS)
 
 
 @pytest.mark.asyncio
@@ -94,6 +107,7 @@ async def test_example_with_interaction_preserves_original_command_trigger() -> 
 
 
 @pytest.mark.asyncio
+@requires_installed_plugins
 async def test_installed_interaction_plugins_keep_original_command_handlers() -> None:
     class _ReplyMsg:
         def __init__(self) -> None:
@@ -160,6 +174,7 @@ async def test_installed_interaction_plugins_keep_original_command_handlers() ->
 
 
 @pytest.mark.asyncio
+@requires_installed_plugins
 async def test_redpack_original_command_preserves_legacy_core_path(monkeypatch) -> None:
     redpack_module = _load_installed_module("redpack-byRBQ", "plugin.py")
     redpack_plugin = redpack_module.RedpackByRBQPlugin()
@@ -183,6 +198,7 @@ async def test_redpack_original_command_preserves_legacy_core_path(monkeypatch) 
     assert isinstance(bot, redpack_module._NativeClientAdapter)
 
 
+@requires_installed_plugins
 def test_guess_number_manifest_declares_interaction_contract() -> None:
     manifest_module = _load_installed_module("guess_number", "manifest.py")
     manifest = manifest_module.MANIFEST
@@ -199,6 +215,7 @@ def test_guess_number_manifest_declares_interaction_contract() -> None:
     assert "valid_seconds" in entry["input_schema"]["properties"]
 
 
+@requires_installed_plugins
 def test_poetry_blank_manifest_declares_interaction_contract() -> None:
     manifest_module = _load_installed_module("poetry_blank", "manifest.py")
     manifest = manifest_module.MANIFEST
@@ -215,6 +232,7 @@ def test_poetry_blank_manifest_declares_interaction_contract() -> None:
     assert "valid_seconds" in entry["input_schema"]["properties"]
 
 
+@requires_installed_plugins
 def test_dice_grid_hunt_manifest_declares_interaction_contract() -> None:
     manifest_module = _load_installed_module("dice_grid_hunt", "manifest.py")
     manifest = manifest_module.MANIFEST
@@ -231,6 +249,7 @@ def test_dice_grid_hunt_manifest_declares_interaction_contract() -> None:
     assert "valid_seconds" in entry["input_schema"]["properties"]
 
 
+@requires_installed_plugins
 def test_lottery_plus_manifest_declares_interaction_contract() -> None:
     manifest_module = _load_installed_module("lottery_plus", "manifest.py")
     manifest = manifest_module.MANIFEST
@@ -248,6 +267,7 @@ def test_lottery_plus_manifest_declares_interaction_contract() -> None:
     assert "message" in entry["input_schema"]["properties"]
 
 
+@requires_installed_plugins
 def test_redpack_manifest_declares_interaction_contract() -> None:
     manifest_module = _load_installed_module("redpack-byRBQ", "manifest.py")
     manifest = manifest_module.MANIFEST
@@ -266,6 +286,7 @@ def test_redpack_manifest_declares_interaction_contract() -> None:
     assert "count" in entry["input_schema"]["properties"]
 
 
+@requires_installed_plugins
 def test_pt_promote_manifest_declares_interaction_contract() -> None:
     manifest_module = _load_installed_module("pt_promote", "manifest.py")
     manifest = manifest_module.MANIFEST
@@ -284,6 +305,7 @@ def test_pt_promote_manifest_declares_interaction_contract() -> None:
     assert "default_options" in entry["input_schema"]["properties"]
 
 
+@requires_installed_plugins
 def test_installed_interaction_plugin_json_matches_manifest_contracts() -> None:
     for plugin_key in (
         "guess_number",
@@ -303,6 +325,7 @@ def test_installed_interaction_plugin_json_matches_manifest_contracts() -> None:
 
 
 @pytest.mark.asyncio
+@requires_installed_plugins
 async def test_guess_number_on_interaction_accepts_legacy_entry_and_returns_result() -> None:
     plugin_module = _load_installed_module("guess_number", "plugin.py")
     plugin = plugin_module.GuessNumberPlugin()
@@ -374,6 +397,7 @@ async def test_guess_number_on_interaction_accepts_legacy_entry_and_returns_resu
 
 
 @pytest.mark.asyncio
+@requires_installed_plugins
 async def test_poetry_blank_on_interaction_returns_result_from_standard_envelope() -> None:
     plugin_module = _load_installed_module("poetry_blank", "plugin.py")
     plugin = plugin_module.PoetryBlankPlugin()
@@ -444,6 +468,7 @@ async def test_poetry_blank_on_interaction_returns_result_from_standard_envelope
 
 
 @pytest.mark.asyncio
+@requires_installed_plugins
 async def test_dice_grid_hunt_on_interaction_returns_result_from_standard_envelope() -> None:
     plugin_module = _load_installed_module("dice_grid_hunt", "plugin.py")
     plugin = plugin_module.DiceGridHuntPlugin()
